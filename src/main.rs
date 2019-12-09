@@ -2,12 +2,12 @@ use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use dotenv::dotenv;
 use serde_derive::Deserialize;
 use serde_json::json;
+use tokio::{self, net::process::Command};
 
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -27,7 +27,7 @@ async fn create_project(
     data: web::Data<Arc<State>>,
     create_project_request: web::Json<CreateProjectRequest>,
 ) -> impl Responder {
-    handle_create_project(data, create_project_request)
+    handle_create_project(data, create_project_request).await
 }
 
 #[actix_rt::main]
@@ -75,13 +75,13 @@ fn read_env() -> (String, u64, usize, String, String) {
     )
 }
 
-fn handle_create_project(
+async fn handle_create_project(
     state: web::Data<Arc<State>>,
     request: web::Json<CreateProjectRequest>,
 ) -> impl Responder {
     if let Some(account_name) = state.db.get(&request.account_id) {
         let repo_name = repo_name(account_name, &request.project_name);
-        match init_repo(&repo_name, &state.base_repo_dir) {
+        match init_repo(&repo_name, &state.base_repo_dir).await {
             Ok(()) => build_create_project_response(true, &repo_name, &state.base_domain),
             Err(error) => match error.kind() {
                 std::io::ErrorKind::AlreadyExists => {
@@ -107,21 +107,22 @@ fn repo_name(account_name: &str, project_name: &str) -> String {
     format!("{}-{}", account_name, project_name)
 }
 
-fn init_repo(repo_name: &str, base_repo_dir: &str) -> Result<(), std::io::Error> {
+async fn init_repo(repo_name: &str, base_repo_dir: &str) -> Result<(), std::io::Error> {
     let repo_dir_name = format!("{}.git", repo_name);
     let repo_path = Path::new(base_repo_dir).join(repo_dir_name);
-    std::fs::create_dir(&repo_path)?;
-    execute_command("git", &["--bare", "init"], &repo_path)?;
-    execute_command("git", &["update-server-info"], &repo_path)?;
+    tokio::fs::create_dir(&repo_path).await?;
+    execute_command("git", &["--bare", "init"], &repo_path).await?;
+    execute_command("git", &["update-server-info"], &repo_path).await?;
     execute_command(
         "git",
         &["config", "--file", "config", "http.receivepack", "true"],
         &repo_path,
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-fn execute_command<P: AsRef<Path> + Debug>(
+async fn execute_command<P: AsRef<Path> + Debug>(
     command: &str,
     args: &[&str],
     current_dir: P,
@@ -129,7 +130,8 @@ fn execute_command<P: AsRef<Path> + Debug>(
     let status = Command::new(command)
         .args(args)
         .current_dir(&current_dir)
-        .status()?;
+        .status()
+        .await?;
     log::info!(
         "executed {} {:?}, current_dir: {:?}, exit_code: {}",
         command,
