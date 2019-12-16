@@ -16,6 +16,7 @@ struct State {
     base_domain: String,
     base_repo_dir: String,
     jenkins_config: JenkinsConfig,
+    deployer_config: DeployerConfig,
     db: HashMap<u64, String>,
 }
 
@@ -25,6 +26,13 @@ struct JenkinsConfig {
     jenkins_api_user: String,
     jenkins_api_token: String,
     job_name: String,
+}
+
+#[derive(Debug)]
+struct DeployerConfig {
+    deployer_api: String,
+    deployer_api_user: String,
+    deployer_api_password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +48,9 @@ struct GitHookTemplte<'a> {
     jenkins_api_user: &'a str,
     jenkins_api_token: &'a str,
     job_name: &'a str,
+    deployer_api: &'a str,
+    deployer_api_user: &'a str,
+    deployer_api_password: &'a str,
 }
 
 async fn create_project(
@@ -64,6 +75,9 @@ async fn main() -> std::io::Result<()> {
         jenkins_api_user,
         jenkins_api_token,
         job_name,
+        deployer_api,
+        deployer_api_user,
+        deployer_api_password,
     ) = read_env();
 
     let mut db = HashMap::new();
@@ -77,6 +91,11 @@ async fn main() -> std::io::Result<()> {
             jenkins_api_user,
             jenkins_api_token,
             job_name,
+        },
+        deployer_config: DeployerConfig {
+            deployer_api,
+            deployer_api_user,
+            deployer_api_password,
         },
         db,
     });
@@ -104,6 +123,9 @@ fn read_env() -> (
     String,
     String,
     String,
+    String,
+    String,
+    String,
 ) {
     (
         env::var("SERVER_IP").expect("can not read SERVER_IP"),
@@ -114,13 +136,16 @@ fn read_env() -> (
         env::var("SERVER_WORKERS")
             .unwrap_or_else(|_| "1".to_string())
             .parse()
-            .unwrap_or_else(|_| 1),
+            .expect("can not parse server workres"),
         env::var("BASE_DOMAIN").expect("can not read BASE_DOMAIN"),
         env::var("BASE_REPO_DIR").expect("can not read BASE_REPO_DIR"),
         env::var("JENKINS_API").expect("can not read JENKINS_API"),
         env::var("JENKINS_API_USER").expect("can not read JENKINS_API_USER"),
         env::var("JENKINS_API_TOKEN").expect("can not read JENKINS_API_TOKEN"),
         env::var("JOB_NAME").expect("can not read JOB_NAME"),
+        env::var("DEPLOYER_API").expect("can not read DEPLOYER_API"),
+        env::var("DEPLOYER_API_USER").expect("can not read DEPLOYER_API_USER"),
+        env::var("DEPLOYER_API_PASSWORD").expect("can not read DEPLOYER_API_PASSWORD"),
     )
 }
 
@@ -130,7 +155,14 @@ async fn handle_create_project(
 ) -> impl Responder {
     if let Some(account_name) = state.db.get(&request.account_id) {
         let repo_name = repo_name(account_name, &request.project_name);
-        match init_repo(&repo_name, &state.base_repo_dir, &state.jenkins_config).await {
+        match init_repo(
+            &repo_name,
+            &state.base_repo_dir,
+            &state.jenkins_config,
+            &state.deployer_config,
+        )
+        .await
+        {
             Ok(()) => build_create_project_response(true, &repo_name, &state.base_domain),
             Err(error) => match error.kind() {
                 std::io::ErrorKind::AlreadyExists => {
@@ -160,6 +192,7 @@ async fn init_repo(
     repo_name: &str,
     base_repo_dir: &str,
     jenkins_config: &JenkinsConfig,
+    deployer_config: &DeployerConfig,
 ) -> Result<(), std::io::Error> {
     let repo_dir_name = format!("{}.git", repo_name);
     let repo_path = Path::new(base_repo_dir).join(repo_dir_name);
@@ -173,7 +206,7 @@ async fn init_repo(
     )
     .await?;
     rewrite_description(&repo_path, &repo_name).await?;
-    add_git_hook(jenkins_config, &repo_path).await?;
+    add_git_hook(jenkins_config, deployer_config, &repo_path).await?;
     Ok(())
 }
 
@@ -209,7 +242,11 @@ where
     Ok(())
 }
 
-async fn add_git_hook<P>(jenkins_config: &JenkinsConfig, repo_path: P) -> Result<(), std::io::Error>
+async fn add_git_hook<P>(
+    jenkins_config: &JenkinsConfig,
+    deployer_config: &DeployerConfig,
+    repo_path: P,
+) -> Result<(), std::io::Error>
 where
     P: AsRef<Path> + Debug,
     P: std::convert::AsRef<std::ffi::OsStr>,
@@ -219,6 +256,9 @@ where
         jenkins_api_user: &jenkins_config.jenkins_api_user,
         jenkins_api_token: &jenkins_config.jenkins_api_token,
         job_name: &jenkins_config.job_name,
+        deployer_api: &deployer_config.deployer_api,
+        deployer_api_user: &deployer_config.deployer_api_user,
+        deployer_api_password: &deployer_config.deployer_api_password,
     }
     .render()
     .expect("can not render git hook data");
