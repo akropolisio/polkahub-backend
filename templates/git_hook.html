@@ -129,9 +129,12 @@ BRANCH=`basename $refname`
 JENKINS_API="{{ jenkins_api }}"
 JENKINS_API_USER="{{ jenkins_api_user }}"
 JENKINS_API_TOKEN="{{ jenkins_api_token }}"
+DEPLOYER_API="{{ deployer_api }}"
+DEPLOYER_API_USER="{{ deployer_api_user }}"
+DEPLOYER_API_PASSWORD="{{ deployer_api_password }}"
 JOB_NAME="{{ job_name }}"
-JOB_PARAMS='{"parameter": [{"name":"REPO_NAME", "value":"~~~REPO_NAME~~~"}, {"name":"BRANCH", "value":"~~~BRANCH~~~"}]}'
-JOB_PARAMS=`echo $JOB_PARAMS | sed -r "s/~~~REPO_NAME~~~/$REPO_NAME/; s/~~~BRANCH~~~/$BRANCH/"`
+JOB_PARAMS='{"parameter": [{"name":"REPO_NAME", "value":"~~~REPO_NAME~~~"}, {"name":"BRANCH", "value":"~~~BRANCH~~~"}, {"deployer_api":"~~~DEPLOYER_API~~~"}, {"deployer_api_user":"~~~DEPLOYER_API_USER~~~"}, {"deployer_api_password":"~~~DEPLOYER_API_PASSWORD~~~"}]}'
+JOB_PARAMS=`echo $JOB_PARAMS | sed -r "s/~~~REPO_NAME~~~/$REPO_NAME/; s/~~~BRANCH~~~/$BRANCH/; s/~~~DEPLOYER_API~~~/$DEPLOYER_API/; s/~~~DEPLOYER_API_USER~~~/$DEPLOYER_API_USER/; s/~~~DEPLOYER_API_PASSWORD~~~/$DEPLOYER_API_PASSWORD/;"`
 
 curl $JENKINS_API/job/$JOB_NAME/build -X POST -u $JENKINS_API_USER:$JENKINS_API_TOKEN --data-urlencode json="$JOB_PARAMS"
 # --- Finished
