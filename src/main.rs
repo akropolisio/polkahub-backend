@@ -205,8 +205,11 @@ async fn init_repo(
         &repo_path,
     )
     .await?;
+    execute_command("chown", &["-R", "service.www-data", "."], &repo_path).await?;
+    execute_command("chmod", &["-R", "775", "."], &repo_path).await?;
     rewrite_description(&repo_path, &repo_name).await?;
     add_git_hook(jenkins_config, deployer_config, &repo_path).await?;
+    execute_command("chmod", &["+x", "hooks/update"], &repo_path).await?;
     Ok(())
 }
 
