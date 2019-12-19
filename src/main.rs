@@ -15,6 +15,7 @@ use std::sync::Arc;
 struct State {
     base_domain: String,
     base_repo_dir: String,
+    base_repo_domain: String,
     jenkins_config: JenkinsConfig,
     deployer_config: DeployerConfig,
     db: HashMap<u64, String>,
@@ -71,6 +72,7 @@ async fn main() -> std::io::Result<()> {
         workers,
         base_domain,
         base_repo_dir,
+        base_repo_domain,
         jenkins_api,
         jenkins_api_user,
         jenkins_api_token,
@@ -86,6 +88,7 @@ async fn main() -> std::io::Result<()> {
     let state = Arc::new(State {
         base_domain,
         base_repo_dir,
+        base_repo_domain,
         jenkins_config: JenkinsConfig {
             jenkins_api,
             jenkins_api_user,
@@ -126,6 +129,7 @@ fn read_env() -> (
     String,
     String,
     String,
+    String,
 ) {
     (
         env::var("SERVER_IP").expect("can not read SERVER_IP"),
@@ -139,6 +143,7 @@ fn read_env() -> (
             .expect("can not parse server workres"),
         env::var("BASE_DOMAIN").expect("can not read BASE_DOMAIN"),
         env::var("BASE_REPO_DIR").expect("can not read BASE_REPO_DIR"),
+        env::var("BASE_REPO_DOMAIN").expect("can not read BASE_REPO_DOMAIN"),
         env::var("JENKINS_API").expect("can not read JENKINS_API"),
         env::var("JENKINS_API_USER").expect("can not read JENKINS_API_USER"),
         env::var("JENKINS_API_TOKEN").expect("can not read JENKINS_API_TOKEN"),
@@ -163,11 +168,19 @@ async fn handle_create_project(
         )
         .await
         {
-            Ok(()) => build_create_project_response(true, &repo_name, &state.base_domain),
+            Ok(()) => build_create_project_response(
+                true,
+                &repo_name,
+                &state.base_domain,
+                &state.base_repo_domain,
+            ),
             Err(error) => match error.kind() {
-                std::io::ErrorKind::AlreadyExists => {
-                    build_create_project_response(false, &repo_name, &state.base_domain)
-                }
+                std::io::ErrorKind::AlreadyExists => build_create_project_response(
+                    false,
+                    &repo_name,
+                    &state.base_domain,
+                    &state.base_repo_domain,
+                ),
                 _ => json!({
                     "status": "error",
                     "reason": format!("can not create repository directory: {}", error)
@@ -277,12 +290,13 @@ fn build_create_project_response(
     repository_created: bool,
     repo_name: &str,
     base_domain: &str,
+    base_repo_domain: &str,
 ) -> String {
     json!({
         "status": "ok",
         "payload": {
             "repository_created": repository_created,
-            "repo_url": repo_url(repo_name, base_domain),
+            "repo_url": repo_url(repo_name, base_repo_domain),
             "http_url": http_url(repo_name, base_domain),
             "ws_url": ws_url(repo_name, base_domain)
         }
@@ -295,9 +309,9 @@ fn repo_url(repo_name: &str, base_domain: &str) -> String {
 }
 
 fn http_url(repo_name: &str, base_domain: &str) -> String {
-    format!("https://{}.chain.{}:8443", repo_name, base_domain)
+    format!("https://{}-rpc.{}", repo_name, base_domain)
 }
 
 fn ws_url(repo_name: &str, base_domain: &str) -> String {
-    format!("wss://{}.chain.{}", repo_name, base_domain)
+    format!("wss://{}.{}", repo_name, base_domain)
 }
