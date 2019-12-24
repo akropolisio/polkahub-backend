@@ -1,4 +1,4 @@
-use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{middleware, web, client, App, HttpResponse, Error, HttpServer, Responder};
 use askama::Template;
 use dotenv::dotenv;
 use serde_derive::Deserialize;
@@ -10,6 +10,9 @@ use std::env;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
+
+const FIND_URL1: &str = "https://registry.polkahub.org/v2/";
+const FIND_URL2: &str = "/tags/list";
 
 #[derive(Debug)]
 struct State {
@@ -41,6 +44,17 @@ struct CreateProjectRequest {
     account_id: u64,
     project_name: String,
 }
+#[derive(Debug, Deserialize)]
+struct FindProjectRequest {
+    id: u64,
+    project_name: String,
+}
+#[derive(Debug, Deserialize)]
+struct InstallProjectRequest {
+    id: u64,
+    project_name: String,
+    version: String,
+}
 
 #[derive(Template)]
 #[template(path = "git_hook.html")]
@@ -59,6 +73,16 @@ async fn create_project(
     create_project_request: web::Json<CreateProjectRequest>,
 ) -> impl Responder {
     handle_create_project(data, create_project_request).await
+}
+async fn find_project(
+    find_project_request: web::Json<FindProjectRequest>,
+) -> impl Responder {
+    handle_find_project(find_project_request).await
+}
+async fn install_project(
+    install_project_request: web::Json<InstallProjectRequest>,
+) -> impl Responder {
+    handle_install_project(install_project_request).await
 }
 
 #[actix_rt::main]
@@ -107,6 +131,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .data(state.clone())
             .route("/api/v1/projects", web::post().to(create_project))
+            .route("/api/v1/find", web::post().to(find_project))
+            .route("/api/v1/install", web::post().to(install_project))
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
@@ -197,8 +223,69 @@ async fn handle_create_project(
     }
 }
 
+async fn handle_find_project(
+    request: web::Json<FindProjectRequest>,
+) -> impl Responder {
+    println!("{:?}", request);
+    let body = check_versions(&request.project_name).await;
+    println!("checked {:?}", body);
+    
+    if let Ok(b) = body {
+        json!({
+            "status": "ok",
+            "payload": Vec::from(b),
+        })
+        .to_string()
+    } else {
+        json!({
+            "status": "error",
+            "reason": "failed to find project"
+        })
+        .to_string()
+    }
+}
+
+async fn handle_install_project(
+    request: web::Json<InstallProjectRequest>,
+) -> impl Responder {
+    let body = check_versions(&request.project_name).await;
+    println!("install {:?}", body);
+    
+    if let Ok(b) = body {
+        json!({
+            "status": "ok",
+            "payload": {
+                "versions": Vec::from(b),
+            }
+        })
+        .to_string()
+    } else {
+        json!({
+            "status": "error",
+            "reason": format!("failed to deploy version {}", request.version)
+        })
+        .to_string()
+    }
+}
+
 fn repo_name(account_name: &str, project_name: &str) -> String {
     format!("{}-{}", account_name, project_name)
+}
+
+async fn check_versions(name: &str) -> Result<Vec<String>, Error>{
+    let client = client::Client::new();
+
+    let response = client
+            .get(&format!("{}{}{}", FIND_URL1, name, FIND_URL2))
+            .header("User-Agent", "Actix-web")
+            .send()                             
+            .await?;
+
+    let body = response;
+    println!("Downloaded: {:?} ", body);
+          
+
+    Ok(Vec::new())
 }
 
 async fn init_repo(
