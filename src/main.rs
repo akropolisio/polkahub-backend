@@ -50,6 +50,11 @@ struct FindProjectRequest {
     project_name: String,
 }
 #[derive(Debug, Deserialize)]
+struct FoundProject {
+    name: String,
+    tags: Vec<String>
+}
+#[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
     id: u64,
     project_name: String,
@@ -226,14 +231,11 @@ async fn handle_create_project(
 async fn handle_find_project(
     request: web::Json<FindProjectRequest>,
 ) -> impl Responder {
-    println!("{:?}", request);
-    let body = check_versions(&request.project_name).await;
-    println!("checked {:?}", body);
-    
-    if let Ok(b) = body {
+    let versions = check_versions(&request.project_name).await;
+    if let Ok(v) = versions {
         json!({
             "status": "ok",
-            "payload": Vec::from(b),
+            "payload": v,
         })
         .to_string()
     } else {
@@ -272,20 +274,13 @@ fn repo_name(account_name: &str, project_name: &str) -> String {
     format!("{}-{}", account_name, project_name)
 }
 
+/// check what versions of a project already exist
+/// return array of strings or empty vector if none
 async fn check_versions(name: &str) -> Result<Vec<String>, Error>{
-    let client = client::Client::new();
+    let body = get_request(&format!("{}{}{}", FIND_URL1, name, FIND_URL2)).await?;
+    let found: FoundProject = serde_json::from_slice(&body)?;
 
-    let response = client
-            .get(&format!("{}{}{}", FIND_URL1, name, FIND_URL2))
-            .header("User-Agent", "Actix-web")
-            .send()                             
-            .await?;
-
-    let body = response;
-    println!("Downloaded: {:?} ", body);
-          
-
-    Ok(Vec::new())
+    Ok(found.tags)
 }
 
 async fn init_repo(
@@ -389,6 +384,18 @@ fn build_create_project_response(
         }
     })
     .to_string()
+}
+
+async fn get_request(url: &str) -> Result<web::Bytes, Error> {
+    let client = client::Client::new();
+    let mut response = client
+            .get(url)
+            .header("User-Agent", "Actix-web")
+            .send()                             
+            .await?;
+
+    let body = response.body().await?;
+    Ok(body)
 }
 
 fn repo_url(repo_name: &str, base_domain: &str) -> String {
