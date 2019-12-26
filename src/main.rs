@@ -234,8 +234,9 @@ async fn handle_find_project(
     state: web::Data<Arc<State>>,
     request: web::Json<FindProjectRequest>,
 ) -> impl Responder {
-    if let Some(_) = state.db.get(&request.account_id) {
-        let versions = check_versions(&request.project_name).await;
+    if let Some(account_name) = state.db.get(&request.account_id) {
+        let repo_name = repo_name(account_name, &request.project_name);
+        let versions = check_versions(&repo_name).await;
         match versions {
             Ok(v) => json!({
                 "status": "ok",
