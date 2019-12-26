@@ -1,4 +1,4 @@
-use actix_web::{middleware, web, client, App, HttpResponse, Error, HttpServer, Responder};
+use actix_web::{client, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
 use askama::Template;
 use dotenv::dotenv;
 use serde_derive::Deserialize;
@@ -46,17 +46,17 @@ struct CreateProjectRequest {
 }
 #[derive(Debug, Deserialize)]
 struct FindProjectRequest {
-    id: u64,
+    account_id: u64,
     project_name: String,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct FoundProject {
     name: String,
-    tags: Vec<String>
+    tags: Vec<String>,
 }
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
-    id: u64,
+    account_id: u64,
     project_name: String,
     version: String,
 }
@@ -80,14 +80,16 @@ async fn create_project(
     handle_create_project(data, create_project_request).await
 }
 async fn find_project(
+    data: web::Data<Arc<State>>,
     find_project_request: web::Json<FindProjectRequest>,
 ) -> impl Responder {
-    handle_find_project(find_project_request).await
+    handle_find_project(data, find_project_request).await
 }
 async fn install_project(
+    data: web::Data<Arc<State>>,
     install_project_request: web::Json<InstallProjectRequest>,
 ) -> impl Responder {
-    handle_install_project(install_project_request).await
+    handle_install_project(data, install_project_request).await
 }
 
 #[actix_rt::main]
@@ -229,42 +231,63 @@ async fn handle_create_project(
 }
 
 async fn handle_find_project(
+    state: web::Data<Arc<State>>,
     request: web::Json<FindProjectRequest>,
 ) -> impl Responder {
-    let versions = check_versions(&request.project_name).await;
-    if let Ok(v) = versions {
-        json!({
-            "status": "ok",
-            "payload": v,
-        })
-        .to_string()
+    if let Some(_) = state.db.get(&request.account_id) {
+        let versions = check_versions(&request.project_name).await;
+        match versions {
+            Ok(v) => json!({
+                "status": "ok",
+                "payload": v,
+            })
+            .to_string(),
+            Err(_) => json!({
+                "status": "error",
+                "reason": "failed to find project"
+            })
+            .to_string(),
+        }
     } else {
         json!({
             "status": "error",
-            "reason": "failed to find project"
+            "reason": "account not found"
         })
         .to_string()
     }
 }
 
 async fn handle_install_project(
+    state: web::Data<Arc<State>>,
     request: web::Json<InstallProjectRequest>,
 ) -> impl Responder {
-    let body = check_versions(&request.project_name).await;
-    println!("install {:?}", body);
-    
-    if let Ok(b) = body {
-        json!({
-            "status": "ok",
-            "payload": {
-                "versions": Vec::from(b),
-            }
-        })
-        .to_string()
+    let (name, v, id) = (&request.project_name, &request.version, request.account_id);
+    if let Some(account_name) = state.db.get(&id) {
+        let repo_name = repo_name(account_name, &name);
+        match execute_deploy(
+            &repo_name,
+            &v,
+            &state.jenkins_config,
+            &state.deployer_config,
+        )
+        .await
+        {
+            Ok(_) => build_create_project_response(
+                false,
+                &repo_name,
+                &state.base_domain,
+                &state.base_repo_domain,
+            ),
+            Err(_) => json!({
+                "status": "error",
+                "reason": &format!("failed to deploy {} with version {}", name, v),
+            })
+            .to_string(),
+        }
     } else {
         json!({
             "status": "error",
-            "reason": format!("failed to deploy version {}", request.version)
+            "reason": "account not found"
         })
         .to_string()
     }
@@ -276,9 +299,12 @@ fn repo_name(account_name: &str, project_name: &str) -> String {
 
 /// check what versions of a project already exist
 /// return array of strings or empty vector if none
-async fn check_versions(name: &str) -> Result<Vec<String>, Error>{
+async fn check_versions(name: &str) -> Result<Vec<String>, Error> {
     let body = get_request(&format!("{}{}{}", FIND_URL1, name, FIND_URL2)).await?;
-    let found: FoundProject = serde_json::from_slice(&body)?;
+    let found: FoundProject = match serde_json::from_slice(&body) {
+        Ok(f) => f,
+        Err(_) => FoundProject::default(),
+    };
 
     Ok(found.tags)
 }
@@ -305,6 +331,26 @@ async fn init_repo(
     rewrite_description(&repo_path, &repo_name).await?;
     add_git_hook(jenkins_config, deployer_config, &repo_path).await?;
     execute_command("chmod", &["+x", "hooks/update"], &repo_path).await?;
+    Ok(())
+}
+
+async fn execute_deploy(
+    repo_name: &str,
+    version: &str,
+    jenkins_config: &JenkinsConfig,
+    deployer_config: &DeployerConfig,
+) -> Result<(), std::io::Error> {
+    let params = build_jenkins_params(repo_name, version, "master", deployer_config);
+    let user = &format!("{}:{}", &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token);
+    let url = &format!("{}/job/{}/build", &jenkins_config.jenkins_api,jenkins_config.job_name);
+    let json = &format!("json={}", params);
+    let args = &[url, "-X", "POST", "-u", user, "--data-urlencode", json];
+    let status = Command::new("curl")
+        .args(args)
+        .status()
+        .await?;
+    // println!("{} {}", repo_name, version);
+    // println!("{:#?}", args);
     Ok(())
 }
 
@@ -389,10 +435,10 @@ fn build_create_project_response(
 async fn get_request(url: &str) -> Result<web::Bytes, Error> {
     let client = client::Client::new();
     let mut response = client
-            .get(url)
-            .header("User-Agent", "Actix-web")
-            .send()                             
-            .await?;
+        .get(url)
+        .header("User-Agent", "Actix-web")
+        .send()
+        .await?;
 
     let body = response.body().await?;
     Ok(body)
@@ -408,4 +454,17 @@ fn http_url(repo_name: &str, base_domain: &str) -> String {
 
 fn ws_url(repo_name: &str, base_domain: &str) -> String {
     format!("wss://{}.{}", repo_name, base_domain)
+}
+
+fn build_jenkins_params(repo_name: &str, v: &str, branch: &str, deployer_config: &DeployerConfig) -> String {
+    json!({
+        "parameter": [
+            {"name":"VERSION", "value": v},
+            {"name":"REPO_NAME", "value": repo_name},
+            {"name":"BRANCH", "value": branch},
+            {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
+            {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
+            {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
+    })
+    .to_string()
 }
