@@ -343,7 +343,7 @@ async fn execute_deploy(
 ) -> Result<(), std::io::Error> {
     let params = build_jenkins_params(repo_name, version, deployer_config);
     let user = &format!("{}:{}", &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token);
-    let url = &format!("{}/job/{}/build", &jenkins_config.jenkins_api,jenkins_config.job_name);
+    let url = &format!("{}/job/deploy-fixed-version/build", &jenkins_config.jenkins_api);
     let json = &format!("json={}", params);
     let args = &[url, "-X", "POST", "-u", user, "--data-urlencode", json];
     let status = Command::new("curl")
