@@ -341,7 +341,7 @@ async fn execute_deploy(
     jenkins_config: &JenkinsConfig,
     deployer_config: &DeployerConfig,
 ) -> Result<(), std::io::Error> {
-    let params = build_jenkins_params(repo_name, version, "master", deployer_config);
+    let params = build_jenkins_params(repo_name, version, deployer_config);
     let user = &format!("{}:{}", &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token);
     let url = &format!("{}/job/{}/build", &jenkins_config.jenkins_api,jenkins_config.job_name);
     let json = &format!("json={}", params);
@@ -350,8 +350,6 @@ async fn execute_deploy(
         .args(args)
         .status()
         .await?;
-    // println!("{} {}", repo_name, version);
-    // println!("{:#?}", args);
     Ok(())
 }
 
@@ -457,12 +455,11 @@ fn ws_url(repo_name: &str, base_domain: &str) -> String {
     format!("wss://{}.{}", repo_name, base_domain)
 }
 
-fn build_jenkins_params(repo_name: &str, v: &str, branch: &str, deployer_config: &DeployerConfig) -> String {
+fn build_jenkins_params(repo_name: &str, v: &str, deployer_config: &DeployerConfig) -> String {
     json!({
         "parameter": [
             {"name":"VERSION", "value": v},
             {"name":"REPO_NAME", "value": repo_name},
-            {"name":"BRANCH", "value": branch},
             {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
             {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
             {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
