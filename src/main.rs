@@ -57,6 +57,7 @@ struct FoundProject {
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
     account_id: u64,
+    app_name: String,
     project_name: String,
     version: String,
 }
@@ -262,26 +263,23 @@ async fn handle_install_project(
     state: web::Data<Arc<State>>,
     request: web::Json<InstallProjectRequest>,
 ) -> impl Responder {
-    let (name, v, id) = (&request.project_name, &request.version, request.account_id);
-    if let Some(account_name) = state.db.get(&id) {
-        let repo_name = repo_name(account_name, &name);
+    let (project_name, app_name, v) = (&request.project_name, &request.app_name, &request.version);
+    if let Some(account_name) = state.db.get(&request.account_id) {
+        let app_url = repo_name(account_name, &app_name);
+        let repo_name = repo_name(account_name, &project_name);
         match execute_deploy(
             &repo_name,
+            &app_name,
             &v,
             &state.jenkins_config,
             &state.deployer_config,
         )
         .await
         {
-            Ok(_) => build_create_project_response(
-                false,
-                &repo_name,
-                &state.base_domain,
-                &state.base_repo_domain,
-            ),
+            Ok(_) => build_install_project_response(&app_url, &state.base_domain),
             Err(_) => json!({
                 "status": "error",
-                "reason": &format!("failed to deploy {} with version {}", name, v),
+                "reason": &format!("failed to deploy {} with version {}", app_name, v),
             })
             .to_string(),
         }
@@ -337,19 +335,23 @@ async fn init_repo(
 
 async fn execute_deploy(
     repo_name: &str,
+    app_name: &str,
     version: &str,
     jenkins_config: &JenkinsConfig,
     deployer_config: &DeployerConfig,
 ) -> Result<(), std::io::Error> {
-    let params = build_jenkins_params(repo_name, version, deployer_config);
-    let user = &format!("{}:{}", &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token);
-    let url = &format!("{}/job/deploy-fixed-version/build", &jenkins_config.jenkins_api);
+    let params = build_jenkins_params(repo_name, app_name, version, deployer_config);
+    let user = &format!(
+        "{}:{}",
+        &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token
+    );
+    let url = &format!(
+        "{}/job/deploy-fixed-version/build",
+        &jenkins_config.jenkins_api
+    );
     let json = &format!("json={}", params);
     let args = &[url, "-X", "POST", "-u", user, "--data-urlencode", json];
-    let status = Command::new("curl")
-        .args(args)
-        .status()
-        .await?;
+    execute_command("curl", args, "").await?;
     Ok(())
 }
 
@@ -431,6 +433,35 @@ fn build_create_project_response(
     .to_string()
 }
 
+fn build_install_project_response(app_url: &str, base_domain: &str) -> String {
+    json!({
+        "status": "ok",
+        "payload": {
+            "http_url": http_url(app_url, base_domain),
+            "ws_url": ws_url(app_url, base_domain)
+        }
+    })
+    .to_string()
+}
+
+fn build_jenkins_params(
+    repo_name: &str,
+    app_name: &str,
+    version: &str,
+    deployer_config: &DeployerConfig,
+) -> String {
+    json!({
+        "parameter": [
+            {"name":"VERSION", "value": version},
+            {"name":"APP_NAME", "value": app_name},
+            {"name":"REPO_NAME", "value": repo_name},
+            {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
+            {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
+            {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
+    })
+    .to_string()
+}
+
 async fn get_request(url: &str) -> Result<web::Bytes, Error> {
     let client = client::Client::new();
     let mut response = client
@@ -453,16 +484,4 @@ fn http_url(repo_name: &str, base_domain: &str) -> String {
 
 fn ws_url(repo_name: &str, base_domain: &str) -> String {
     format!("wss://{}.{}", repo_name, base_domain)
-}
-
-fn build_jenkins_params(repo_name: &str, v: &str, deployer_config: &DeployerConfig) -> String {
-    json!({
-        "parameter": [
-            {"name":"VERSION", "value": v},
-            {"name":"REPO_NAME", "value": repo_name},
-            {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
-            {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
-            {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
-    })
-    .to_string()
 }
