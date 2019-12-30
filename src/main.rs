@@ -346,7 +346,7 @@ async fn execute_deploy(
         &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token
     );
     let url = &format!(
-        "https://{}/job/deploy-fixed-version/build",
+        "{}/job/deploy-fixed-version/build",
         &jenkins_config.jenkins_api
     );
     let json = &format!("json={}", params);
