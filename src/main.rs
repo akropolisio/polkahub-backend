@@ -349,7 +349,7 @@ async fn execute_deploy(
         "{}/job/deploy-fixed-version/build",
         &jenkins_config.jenkins_api
     );
-    let json = &format!("json={}", params);
+    let json = &format!("json={:?}", params);
     let args = &[url, "-X", "POST", "-u", user, "--data-urlencode", json];
     execute_command("curl", args, "").await?;
     Ok(())
