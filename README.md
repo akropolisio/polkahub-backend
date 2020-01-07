@@ -33,3 +33,17 @@ cp .env.example .env
 ```bash
 cargo run
 ```
+
+# Environment variables description
+SERVER_IP - IP address for binding, e.g. 127.0.0.1
+SERVER_PORT - port for binding, e.g. 8080
+BASE_DOMAIN - base domain where nodes will deploy, e.g. "example.org"
+BASE_REPO_DIR - home directory for git repositories, e.g. "repo"
+BASE_REPO_DOMAIN - base domain where git repositories storied, e.g. "example.org"
+JENKINS_API - Jenkins API URL, e.g. "localhost:8080"
+JENKINS_API_USER - Jenkins API user, e.g. "user"
+JENKINS_API_TOKEN - Jenkins API token, e.g. "token"
+JOB_NAME - Jenkins job name for building projects, e.g. "job"
+DEPLOYER_API - Deployer API URL, e.g. "localhost:8081"
+DEPLOYER_API_USER - Deployer API user, e.g. "user"
+DEPLOYER_API_PASSWORD - Deployer API password, e.g. "password"
