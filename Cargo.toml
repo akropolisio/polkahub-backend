@@ -13,7 +13,11 @@ dotenv = "0.15.0"
 serde = "1.0.103"
 serde_derive = "1.0.103"
 serde_json = "1.0.44"
-actix-web = { version = "2.0.0-alpha.2", features = ["openssl"] }
-actix-rt = "1.0.0-alpha.2"
-tokio = { version = "0.2.0-alpha.6", features = ["process"] }
+actix-web = { version = "2.0.0", features = ["openssl"] }
+actix-rt = "1.0.0"
+tokio = { version = "0.2.8", features = ["fs", "process"] }
 askama = "0.8.0"
+diesel = { version = "1.4.3", features = ["r2d2", "postgres", "chrono"] }
+chrono = "0.4.10"
+argon2rs = "0.2.5"
+hex = "0.4.0"

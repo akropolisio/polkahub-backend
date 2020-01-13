@@ -1,20 +1,32 @@
+#[macro_use]
+extern crate diesel;
+
 use actix_web::{client, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
+use argon2rs::argon2i_simple;
 use askama::Template;
+use diesel::pg::PgConnection;
+use diesel::r2d2::{ConnectionManager, Pool};
 use dotenv::dotenv;
+use hex;
 use serde_derive::Deserialize;
 use serde_json::json;
-use tokio::{self, fs::File, io::AsyncWriteExt, net::process::Command};
+use tokio::{self, fs::File, io::AsyncWriteExt, process::Command};
 
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 
+mod config;
+mod database;
+mod models;
+mod schema;
+
+use config::{DatabaseConfig, DeployerConfig, JenkinsConfig};
+
 const FIND_URL1: &str = "https://registry.polkahub.org/v2/";
 const FIND_URL2: &str = "/tags/list";
 
-#[derive(Debug)]
 struct State {
     base_domain: String,
     base_repo_dir: String,
@@ -22,21 +34,8 @@ struct State {
     jenkins_config: JenkinsConfig,
     deployer_config: DeployerConfig,
     db: HashMap<u64, String>,
-}
-
-#[derive(Debug)]
-struct JenkinsConfig {
-    jenkins_api: String,
-    jenkins_api_user: String,
-    jenkins_api_token: String,
-    job_name: String,
-}
-
-#[derive(Debug)]
-struct DeployerConfig {
-    deployer_api: String,
-    deployer_api_user: String,
-    deployer_api_password: String,
+    salt: String,
+    pool: Pool<ConnectionManager<PgConnection>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,22 +43,31 @@ struct CreateProjectRequest {
     account_id: u64,
     project_name: String,
 }
+
 #[derive(Debug, Deserialize)]
 struct FindProjectRequest {
     account_id: u64,
     project_name: String,
 }
+
 #[derive(Debug, Default, Deserialize)]
 struct FoundProject {
     name: String,
     tags: Vec<String>,
 }
+
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
     account_id: u64,
     app_name: String,
     project_name: String,
     version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignupRequest {
+    email: String,
+    password: String,
 }
 
 #[derive(Template)]
@@ -93,6 +101,13 @@ async fn install_project(
     handle_install_project(data, install_project_request).await
 }
 
+async fn signup(
+    data: web::Data<Arc<State>>,
+    signup_request: web::Json<SignupRequest>,
+) -> impl Responder {
+    handle_signup(data, signup_request).await
+}
+
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -105,34 +120,26 @@ async fn main() -> std::io::Result<()> {
         base_domain,
         base_repo_dir,
         base_repo_domain,
-        jenkins_api,
-        jenkins_api_user,
-        jenkins_api_token,
-        job_name,
-        deployer_api,
-        deployer_api_user,
-        deployer_api_password,
-    ) = read_env();
+        jenkins_config,
+        deployer_config,
+        database_config,
+    ) = config::read_env();
 
     let mut db = HashMap::new();
     db.insert(1u64, "akropolis".to_string());
+
+    let pool = database::create_pool(&database_config);
+    let salt = database_config.salt;
 
     let state = Arc::new(State {
         base_domain,
         base_repo_dir,
         base_repo_domain,
-        jenkins_config: JenkinsConfig {
-            jenkins_api,
-            jenkins_api_user,
-            jenkins_api_token,
-            job_name,
-        },
-        deployer_config: DeployerConfig {
-            deployer_api,
-            deployer_api_user,
-            deployer_api_password,
-        },
+        jenkins_config,
+        deployer_config,
         db,
+        salt,
+        pool,
     });
 
     HttpServer::new(move || {
@@ -141,51 +148,14 @@ async fn main() -> std::io::Result<()> {
             .route("/api/v1/projects", web::post().to(create_project))
             .route("/api/v1/find", web::post().to(find_project))
             .route("/api/v1/install", web::post().to(install_project))
+            .route("/api/v1/signup", web::post().to(signup))
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
     .bind(format!("{}:{}", ip, port))?
     .workers(workers)
-    .start()
+    .run()
     .await
-}
-
-fn read_env() -> (
-    String,
-    u64,
-    usize,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-) {
-    (
-        env::var("SERVER_IP").expect("can not read SERVER_IP"),
-        env::var("SERVER_PORT")
-            .expect("can not read SERVER_PORT")
-            .parse()
-            .expect("can not parse server port"),
-        env::var("SERVER_WORKERS")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse()
-            .expect("can not parse server workres"),
-        env::var("BASE_DOMAIN").expect("can not read BASE_DOMAIN"),
-        env::var("BASE_REPO_DIR").expect("can not read BASE_REPO_DIR"),
-        env::var("BASE_REPO_DOMAIN").expect("can not read BASE_REPO_DOMAIN"),
-        env::var("JENKINS_API").expect("can not read JENKINS_API"),
-        env::var("JENKINS_API_USER").expect("can not read JENKINS_API_USER"),
-        env::var("JENKINS_API_TOKEN").expect("can not read JENKINS_API_TOKEN"),
-        env::var("JOB_NAME").expect("can not read JOB_NAME"),
-        env::var("DEPLOYER_API").expect("can not read DEPLOYER_API"),
-        env::var("DEPLOYER_API_USER").expect("can not read DEPLOYER_API_USER"),
-        env::var("DEPLOYER_API_PASSWORD").expect("can not read DEPLOYER_API_PASSWORD"),
-    )
 }
 
 async fn handle_create_project(
@@ -290,6 +260,59 @@ async fn handle_install_project(
         })
         .to_string()
     }
+}
+
+async fn handle_signup(
+    state: web::Data<Arc<State>>,
+    request: web::Json<SignupRequest>,
+) -> impl Responder {
+    use crate::diesel::RunQueryDsl;
+    use diesel::result::{DatabaseErrorKind, Error};
+
+    if request.password.len() < 8 {
+        log::warn!(
+            "can not create new user, email: {}, reason: password shorter than 8 characters",
+            &request.email
+        );
+        return error_response("password shorter than 8 characters");
+    }
+    let conn = state.pool.get().expect("can not get connection from pool");
+    let new_user = models::NewUser {
+        email: &request.email,
+        password: &hex::encode(argon2i_simple(&state.salt, &request.password)),
+    };
+    let result = diesel::insert_into(schema::users::table)
+        .values(new_user)
+        .execute(&conn);
+    match result {
+        Ok(_) => {
+            log::info!("created new user, email: {}", &request.email);
+            json!({ "status": "ok" }).to_string()
+        }
+        Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+            log::warn!(
+                "can not create new user, reason: email {} already exists",
+                &request.email
+            );
+            error_response("email already exists")
+        }
+        Err(err) => {
+            log::error!(
+                "can not create user, email: {}, reason: {:?}",
+                &request.email,
+                err
+            );
+            error_response("internal error")
+        }
+    }
+}
+
+fn error_response(reason: &str) -> String {
+    json!({
+        "status": "error",
+        "reason": reason,
+    })
+    .to_string()
 }
 
 fn repo_name(account_name: &str, project_name: &str) -> String {
