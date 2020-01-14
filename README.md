@@ -58,3 +58,17 @@ DEPLOYER_API - Deployer API URL, e.g. "localhost:8081"
 DEPLOYER_API_USER - Deployer API user, e.g. "user"
 
 DEPLOYER_API_PASSWORD - Deployer API password, e.g. "password"
+
+POSTGRES_HOST - Postgres host, e.g. 127.0.0.1
+
+POSTGRES_PORT - Postgres port, e.g. 5432
+
+POSTGRES_DATABASE - Postgres database name, e.g. polkahub
+
+POSTGRES_USER - Postgres user, e.g. polkahub
+
+POSTGRES_PASSWORD - Postgres password, e.g. password
+
+POSTGRES_SALT - Postgres salt, e.g. salt
+
+JWT_SECRET - JWT secret, e.g. secret
