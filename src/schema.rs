@@ -5,7 +5,7 @@ table! {
         password -> Text,
         email_verified -> Bool,
         token -> Nullable<Text>,
-        token_expiried_at -> Nullable<Timestamptz>,
+        token_expired_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }

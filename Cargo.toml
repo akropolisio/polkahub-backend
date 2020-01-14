@@ -21,3 +21,6 @@ diesel = { version = "1.4.3", features = ["r2d2", "postgres", "chrono"] }
 chrono = "0.4.10"
 argon2rs = "0.2.5"
 hex = "0.4.0"
+jsonwebtoken = "6.0.1"
+uuid = { version = "0.8.1", features = ["v4"] }
+reqwest = "0.10.1"
