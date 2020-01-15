@@ -4,7 +4,7 @@ CREATE TABLE users (
     password TEXT NOT NULL,
     email_verified BOOLEAN NOT NULL DEFAULT 'f',
     token TEXT,
-    token_expiried_at TIMESTAMP WITH TIME ZONE,
+    token_expired_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 )
