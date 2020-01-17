@@ -1,6 +1,7 @@
 table! {
     users (id) {
         id -> Int8,
+        login -> Text,
         email -> Text,
         password -> Text,
         email_verified -> Bool,
