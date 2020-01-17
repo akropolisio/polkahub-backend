@@ -12,13 +12,14 @@ use serde_derive::Deserialize;
 use serde_json::json;
 use tokio::{self, fs::File, io::AsyncWriteExt, process::Command};
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 
 mod config;
 mod database;
+mod errors;
+mod login_utils;
 mod models;
 mod password_utils;
 mod schema;
@@ -35,7 +36,6 @@ struct State {
     base_repo_domain: String,
     jenkins_config: JenkinsConfig,
     deployer_config: DeployerConfig,
-    db: HashMap<u64, String>,
     client: Client,
     salt: String,
     pool: Pool<ConnectionManager<PgConnection>>,
@@ -44,13 +44,11 @@ struct State {
 
 #[derive(Debug, Deserialize)]
 struct CreateProjectRequest {
-    account_id: u64,
     project_name: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct FindProjectRequest {
-    account_id: u64,
     project_name: String,
 }
 
@@ -62,7 +60,6 @@ struct FoundProject {
 
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
-    account_id: u64,
     app_name: String,
     project_name: String,
     version: String,
@@ -95,22 +92,25 @@ struct GitHookTemplte<'a> {
 async fn create_project(
     data: web::Data<Arc<State>>,
     create_project_request: web::Json<CreateProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    handle_create_project(data, create_project_request).await
+    handle_create_project(data, create_project_request, http_request).await
 }
 
 async fn find_project(
     data: web::Data<Arc<State>>,
     find_project_request: web::Json<FindProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    handle_find_project(data, find_project_request).await
+    handle_find_project(data, find_project_request, http_request).await
 }
 
 async fn install_project(
     data: web::Data<Arc<State>>,
     install_project_request: web::Json<InstallProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    handle_install_project(data, install_project_request).await
+    handle_install_project(data, install_project_request, http_request).await
 }
 
 async fn signup(
@@ -145,9 +145,6 @@ async fn main() -> std::io::Result<()> {
         database_config,
     ) = config::read_env();
 
-    let mut db = HashMap::new();
-    db.insert(1u64, "akropolis".to_string());
-
     let client = build_client().map_err(|e| {
         log::warn!("can not create HTTP client, reason: {}", e);
         std::io::Error::new(std::io::ErrorKind::Other, "can not create HTTP client")
@@ -161,7 +158,6 @@ async fn main() -> std::io::Result<()> {
         base_repo_domain,
         jenkins_config,
         deployer_config,
-        db,
         client,
         salt,
         pool,
@@ -192,105 +188,89 @@ fn build_client() -> Result<Client, reqwest::Error> {
 async fn handle_create_project(
     state: web::Data<Arc<State>>,
     request: web::Json<CreateProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    if let Some(account_name) = state.db.get(&request.account_id) {
-        let repo_name = repo_name(account_name, &request.project_name);
-        match init_repo(
+    let login = match get_login_by_token(state.clone(), http_request) {
+        Ok(login) => login,
+        Err(err) => return err,
+    };
+    let repo_name = repo_name(&login, &request.project_name);
+    match init_repo(
+        &repo_name,
+        &state.base_repo_dir,
+        &state.jenkins_config,
+        &state.deployer_config,
+    )
+    .await
+    {
+        Ok(()) => build_create_project_response(
+            true,
             &repo_name,
-            &state.base_repo_dir,
-            &state.jenkins_config,
-            &state.deployer_config,
-        )
-        .await
-        {
-            Ok(()) => build_create_project_response(
-                true,
+            &state.base_domain,
+            &state.base_repo_domain,
+        ),
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::AlreadyExists => build_create_project_response(
+                false,
                 &repo_name,
                 &state.base_domain,
                 &state.base_repo_domain,
             ),
-            Err(error) => match error.kind() {
-                std::io::ErrorKind::AlreadyExists => build_create_project_response(
-                    false,
-                    &repo_name,
-                    &state.base_domain,
-                    &state.base_repo_domain,
-                ),
-                _ => json!({
-                    "status": "error",
-                    "reason": format!("can not create repository directory: {}", error)
-                })
-                .to_string(),
-            },
-        }
-    } else {
-        json!({
-            "status": "error",
-            "reason": "account not found"
-        })
-        .to_string()
+            _ => errors::error_from_reason(&format!(
+                "can not create repository directory: {}",
+                error
+            )),
+        },
     }
 }
 
 async fn handle_find_project(
     state: web::Data<Arc<State>>,
     request: web::Json<FindProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    if let Some(account_name) = state.db.get(&request.account_id) {
-        let repo_name = repo_name(account_name, &request.project_name);
-        let versions = check_versions(&repo_name).await;
-        match versions {
-            Ok(v) => json!({
-                "status": "ok",
-                "payload": v,
-            })
-            .to_string(),
-            Err(_) => json!({
-                "status": "error",
-                "reason": "failed to find project"
-            })
-            .to_string(),
-        }
-    } else {
-        json!({
-            "status": "error",
-            "reason": "account not found"
+    let _login = match get_login_by_token(state.clone(), http_request) {
+        Ok(login) => login,
+        Err(err) => return err,
+    };
+    let login = "akropolis";
+    let repo_name = repo_name(login, &request.project_name);
+    let versions = check_versions(&repo_name).await;
+    match versions {
+        Ok(v) => json!({
+            "status": "ok",
+            "payload": v,
         })
-        .to_string()
+        .to_string(),
+        Err(_) => errors::failed_to_find_project(),
     }
 }
 
 async fn handle_install_project(
     state: web::Data<Arc<State>>,
     request: web::Json<InstallProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
+    let login = match get_login_by_token(state.clone(), http_request) {
+        Ok(login) => login,
+        Err(err) => return err,
+    };
+    let account_name = "akropolis";
     let (project_name, app_name, v) = (&request.project_name, &request.app_name, &request.version);
-    if let Some(account_name) = state.db.get(&request.account_id) {
-        let app_url = repo_name(account_name, &app_name);
-        let repo_name = repo_name(account_name, &project_name);
-        match execute_deploy(
-            &repo_name,
-            &app_name,
-            &v,
-            &state.client,
-            &state.jenkins_config,
-            &state.deployer_config,
-        )
-        .await
-        {
-            Ok(_) => build_install_project_response(&app_url, &state.base_domain),
-            Err(_) => json!({
-                "status": "error",
-                "reason": &format!("failed to deploy {} with version {}", app_name, v),
-            })
-            .to_string(),
-        }
-    } else {
-        json!({
-            "status": "error",
-            "reason": "account not found"
-        })
-        .to_string()
+    let app_url = repo_name(&login, &app_name);
+    let repo_name = repo_name(&account_name, &project_name);
+    match execute_deploy(
+        &repo_name,
+        &app_name,
+        &v,
+        &state.client,
+        &state.jenkins_config,
+        &state.deployer_config,
+    )
+    .await
+    {
+        Ok(_) => build_install_project_response(&app_url, &state.base_domain),
+        Err(_) => errors::failed_to_deploy_project(app_name, v),
     }
 }
 
@@ -306,12 +286,16 @@ async fn handle_signup(
         &request.password,
         "can not create new user",
     ) {
-        return error_response(&reason);
+        return errors::error_from_reason(&reason);
     }
 
     let password_with_salt = password_utils::password_with_salt(&state.salt, &request.password);
-    let conn = state.pool.get().expect("can not get connection from pool");
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
     let new_user = models::NewUser {
+        login: &login_utils::login(),
         email: &request.email,
         password: &password_with_salt,
     };
@@ -328,7 +312,7 @@ async fn handle_signup(
                 "can not create new user, reason: email {} already exists",
                 &request.email
             );
-            error_response("email already exists")
+            errors::email_already_exists()
         }
         Err(err) => {
             log::error!(
@@ -336,7 +320,7 @@ async fn handle_signup(
                 &request.email,
                 err
             );
-            error_response("internal error")
+            errors::internal_error()
         }
     }
 }
@@ -352,11 +336,14 @@ async fn handle_login(
     if let Err(reason) =
         password_utils::validate_password(&request.email, &request.password, "can not login user")
     {
-        return error_response(&reason);
+        return errors::error_from_reason(&reason);
     }
 
     let password_with_salt = password_utils::password_with_salt(&state.salt, &request.password);
-    let conn = state.pool.get().expect("can not get connection from pool");
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
 
     let result = users
         .filter(email.eq(&request.email))
@@ -382,13 +369,13 @@ async fn handle_login(
                         &request.email,
                         reason
                     );
-                    error_response("internal error")
+                    errors::internal_error()
                 }
             }
         }
         Err(diesel::result::Error::NotFound) => {
             log::warn!("user not found, email: {}", &request.email);
-            error_response("user not found")
+            errors::account_not_found()
         }
         Err(reason) => {
             log::warn!(
@@ -396,21 +383,13 @@ async fn handle_login(
                 &request.email,
                 reason
             );
-            error_response("internal error")
+            errors::internal_error()
         }
     }
 }
 
-fn error_response(reason: &str) -> String {
-    json!({
-        "status": "error",
-        "reason": reason,
-    })
-    .to_string()
-}
-
-fn repo_name(account_name: &str, project_name: &str) -> String {
-    format!("{}-{}", account_name, project_name)
+fn repo_name(login: &str, project_name: &str) -> String {
+    format!("{}-{}", login, project_name)
 }
 
 /// check what versions of a project already exist
@@ -599,6 +578,50 @@ async fn get_request(url: &str) -> Result<web::Bytes, Error> {
 
     let body = response.body().await?;
     Ok(body)
+}
+
+fn read_token(http_request: web::HttpRequest) -> Result<String, String> {
+    match http_request.headers().get("authorization") {
+        Some(auth) => {
+            let parts = auth
+                .to_str()
+                .map_err(|_| errors::invalid_token())?
+                .split(' ')
+                .collect::<Vec<_>>();
+            if parts.len() == 2 && parts[0] == "Bearer" {
+                Ok(parts[1].to_string())
+            } else {
+                Err(errors::invalid_token())
+            }
+        }
+        None => Err(errors::invalid_token()),
+    }
+}
+
+fn get_login_by_token(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> Result<String, String> {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::User;
+    use crate::schema::users::dsl::{token, token_expired_at, users};
+
+    let auth_token = read_token(http_request)?;
+    let conn = state.pool.get().map_err(|_| errors::internal_error())?;
+    let result = users
+        .filter(token.eq(&auth_token))
+        .filter(token_expired_at.gt(Utc::now()))
+        .first::<User>(&conn);
+    match result {
+        Ok(user) => {
+            if user.email_verified {
+                Ok(user.login)
+            } else {
+                Err(errors::email_not_verified())
+            }
+        }
+        Err(_) => Err(errors::account_not_found()),
+    }
 }
 
 fn repo_url(repo_name: &str, base_domain: &str) -> String {

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Queryable)]
 pub struct User {
     pub id: i64,
+    pub login: String,
     pub email: String,
     pub password: String,
     pub email_verified: bool,
@@ -17,6 +18,7 @@ pub struct User {
 #[derive(Debug, Insertable)]
 #[table_name = "users"]
 pub struct NewUser<'a> {
+    pub login: &'a str,
     pub email: &'a str,
     pub password: &'a str,
 }
