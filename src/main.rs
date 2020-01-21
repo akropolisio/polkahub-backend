@@ -129,7 +129,6 @@ async fn login(
 }
 
 async fn git_auth(data: web::Data<Arc<State>>, http_request: web::HttpRequest) -> HttpResponse {
-    log::info!("{} => {:?}", http_request.method(), http_request.headers());
     handle_git_auth(data, http_request).await
 }
 
