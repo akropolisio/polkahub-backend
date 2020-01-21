@@ -3,6 +3,7 @@ extern crate diesel;
 
 use actix_web::{client, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
 use askama::Template;
+use base64;
 use chrono::Utc;
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
@@ -127,6 +128,10 @@ async fn login(
     handle_login(data, login_request).await
 }
 
+async fn git_auth(data: web::Data<Arc<State>>, http_request: web::HttpRequest) -> HttpResponse {
+    handle_git_auth(data, http_request).await
+}
+
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -172,6 +177,7 @@ async fn main() -> std::io::Result<()> {
             .route("/api/v1/install", web::post().to(install_project))
             .route("/api/v1/signup", web::post().to(signup))
             .route("/api/v1/login", web::post().to(login))
+            .route("/api/v1/git_auth", web::get().to(git_auth))
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
@@ -388,6 +394,51 @@ async fn handle_login(
     }
 }
 
+async fn handle_git_auth(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> HttpResponse {
+    match http_request.headers().get("authorization") {
+        Some(_auth) => {
+            let login = match get_login_by_email_and_password(state, &http_request) {
+                Ok(login) => login,
+                Err(reason) => {
+                    return HttpResponse::Unauthorized()
+                        .header("content-type", "application/json")
+                        .body(reason)
+                }
+            };
+            let original_uri = if let Some(value) = http_request.headers().get("x-original-uri") {
+                if let Ok(value_str) = value.to_str() {
+                    value_str
+                } else {
+                    return HttpResponse::Forbidden()
+                        .header("content-type", "application/json")
+                        .body(errors::invalid_original_uri());
+                }
+            } else {
+                return HttpResponse::Forbidden()
+                    .header("content-type", "application/json")
+                    .body(errors::invalid_original_uri());
+            };
+            if !(&original_uri[login.len() + 1..login.len() + 2] == "-"
+                && original_uri[1..=login.len()] == login)
+            {
+                return HttpResponse::Forbidden().into();
+            }
+            HttpResponse::Ok()
+                .header("content-type", "application/json")
+                .body(json!({"status": "ok"}).to_string())
+        }
+        None => HttpResponse::Unauthorized()
+            .header(
+                "WWW-Authenticate",
+                "Basic realm=\"Please enter your email and password\"",
+            )
+            .finish(),
+    }
+}
+
 fn repo_name(login: &str, project_name: &str) -> String {
     format!("{}-{}", login, project_name)
 }
@@ -598,6 +649,34 @@ fn read_token(http_request: web::HttpRequest) -> Result<String, String> {
     }
 }
 
+fn read_email_and_password(http_request: &web::HttpRequest) -> Result<(String, String), String> {
+    match http_request.headers().get("authorization") {
+        Some(auth) => {
+            let parts = auth
+                .to_str()
+                .map_err(|_| errors::invalid_email_and_password())?
+                .split(' ')
+                .collect::<Vec<_>>();
+            if parts.len() == 2 && parts[0] == "Basic" {
+                let decoded_credintals =
+                    base64::decode(parts[1]).map_err(|_| errors::invalid_email_and_password())?;
+                let decoded_credintals = String::from_utf8(decoded_credintals)
+                    .map_err(|_| errors::invalid_email_and_password())?;
+                if let Some(pos) = decoded_credintals.chars().position(|c| c == ':') {
+                    let email = &decoded_credintals[..pos];
+                    let password = &decoded_credintals[pos + 1..];
+                    Ok((email.to_string(), password.to_string()))
+                } else {
+                    Err(errors::invalid_email_and_password())
+                }
+            } else {
+                Err(errors::invalid_email_and_password())
+            }
+        }
+        None => Err(errors::invalid_email_and_password()),
+    }
+}
+
 fn get_login_by_token(
     state: web::Data<Arc<State>>,
     http_request: web::HttpRequest,
@@ -611,6 +690,36 @@ fn get_login_by_token(
     let result = users
         .filter(token.eq(&auth_token))
         .filter(token_expired_at.gt(Utc::now()))
+        .first::<User>(&conn);
+    match result {
+        Ok(user) => {
+            if user.email_verified {
+                Ok(user.login)
+            } else {
+                Err(errors::email_not_verified())
+            }
+        }
+        Err(_) => Err(errors::account_not_found()),
+    }
+}
+
+fn get_login_by_email_and_password(
+    state: web::Data<Arc<State>>,
+    http_request: &web::HttpRequest,
+) -> Result<String, String> {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::User;
+    use crate::schema::users::dsl::{email, password, users};
+
+    let (user_email, user_password) = read_email_and_password(http_request)?;
+    if user_email.is_empty() || user_password.len() < 8 {
+        return Err(errors::invalid_email_and_password());
+    }
+    let user_password_with_salt = password_utils::password_with_salt(&state.salt, &user_password);
+    let conn = state.pool.get().map_err(|_| errors::internal_error())?;
+    let result = users
+        .filter(email.eq(&user_email))
+        .filter(password.eq(&user_password_with_salt))
         .first::<User>(&conn);
     match result {
         Ok(user) => {
