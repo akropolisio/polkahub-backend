@@ -36,6 +36,14 @@ pub(crate) fn invalid_token() -> String {
     json!({ "status": "error", "reason": "invalid token" }).to_string()
 }
 
+pub(crate) fn invalid_email_and_password() -> String {
+    json!({ "status": "error", "reason": "invalid email and password" }).to_string()
+}
+
+pub(crate) fn invalid_original_uri() -> String {
+    json!({ "status": "error", "reason": "invalid original_uri" }).to_string()
+}
+
 pub(crate) fn error_from_reason(reason: &str) -> String {
     json!({
         "status": "error",
