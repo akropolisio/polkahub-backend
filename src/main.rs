@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate diesel;
 
-use actix_web::{client, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use askama::Template;
 use base64;
 use chrono::Utc;
@@ -9,7 +9,7 @@ use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
 use dotenv::dotenv;
 use reqwest::Client;
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{self, fs::File, io::AsyncWriteExt, process::Command};
 
@@ -27,9 +27,6 @@ mod schema;
 mod token;
 
 use config::{DatabaseConfig, DeployerConfig, JenkinsConfig};
-
-const FIND_URL1: &str = "https://registry.polkahub.org/v2/";
-const FIND_URL2: &str = "/tags/list";
 
 struct State {
     base_domain: String,
@@ -50,13 +47,15 @@ struct CreateProjectRequest {
 
 #[derive(Debug, Deserialize)]
 struct FindProjectRequest {
-    project_name: String,
+    name: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize)]
 struct FoundProject {
+    login: String,
     name: String,
-    tags: Vec<String>,
+    version: String,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +75,14 @@ struct SignupRequest {
 struct LoginRequest {
     email: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsertUserProjectsRequest {
+    login: String,
+    name: String,
+    version: String,
+    description: Option<String>,
 }
 
 #[derive(Template)]
@@ -132,6 +139,13 @@ async fn git_auth(data: web::Data<Arc<State>>, http_request: web::HttpRequest) -
     handle_git_auth(data, http_request).await
 }
 
+async fn insert_user_projects(
+    data: web::Data<Arc<State>>,
+    login_request: web::Json<InsertUserProjectsRequest>,
+) -> impl Responder {
+    handle_insert_user_projects(data, login_request).await
+}
+
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -178,6 +192,10 @@ async fn main() -> std::io::Result<()> {
             .route("/api/v1/signup", web::post().to(signup))
             .route("/api/v1/login", web::post().to(login))
             .route("/api/v1/git_auth", web::get().to(git_auth))
+            .route(
+                "/api/v1/user_projects",
+                web::post().to(insert_user_projects),
+            )
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
@@ -235,19 +253,31 @@ async fn handle_find_project(
     request: web::Json<FindProjectRequest>,
     http_request: web::HttpRequest,
 ) -> impl Responder {
+    use crate::diesel::{QueryDsl, RunQueryDsl, TextExpressionMethods};
+    use crate::schema::user_projects::dsl::{description, name, user_projects, version};
+    use crate::schema::users::dsl::{login, users};
+
     let _login = match get_login_by_token(state.clone(), http_request) {
-        Ok(login) => login,
+        Ok(l) => l,
         Err(err) => return err,
     };
-    let login = "akropolis";
-    let repo_name = repo_name(login, &request.project_name);
-    let versions = check_versions(&repo_name).await;
-    match versions {
-        Ok(v) => json!({
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    type Record = (String, String, String, Option<String>);
+    let results: Result<Vec<Record>, diesel::result::Error> = user_projects
+        .inner_join(users)
+        .filter(name.like(format!("%{}%", &request.name)))
+        .select((login, name, version, description))
+        .get_results(&conn);
+    match results {
+        Ok(projects) => json!({
             "status": "ok",
-            "payload": v,
-        })
-        .to_string(),
+            "payload": projects.into_iter().map(|p| FoundProject { login: p.0, name: p.1, version: p.2, description: p.3 }).collect::<Vec<_>>(),
+        }).to_string(),
         Err(_) => errors::failed_to_find_project(),
     }
 }
@@ -439,20 +469,83 @@ async fn handle_git_auth(
     }
 }
 
-fn repo_name(login: &str, project_name: &str) -> String {
-    format!("{}-{}", login, project_name)
-}
+async fn handle_insert_user_projects(
+    state: web::Data<Arc<State>>,
+    request: web::Json<InsertUserProjectsRequest>,
+) -> impl Responder {
+    use crate::diesel::{
+        result::{DatabaseErrorKind, Error},
+        ExpressionMethods, QueryDsl, RunQueryDsl,
+    };
+    use crate::models::{NewUserProject, User};
+    use crate::schema::users::dsl::{login, users};
 
-/// check what versions of a project already exist
-/// return array of strings or empty vector if none
-async fn check_versions(name: &str) -> Result<Vec<String>, Error> {
-    let body = get_request(&format!("{}{}{}", FIND_URL1, name, FIND_URL2)).await?;
-    let found: FoundProject = match serde_json::from_slice(&body) {
-        Ok(f) => f,
-        Err(_) => FoundProject::default(),
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
     };
 
-    Ok(found.tags)
+    let result = users.filter(login.eq(&request.login)).first::<User>(&conn);
+
+    match result {
+        Ok(user) => {
+            let new_user_project = NewUserProject {
+                user_id: user.id,
+                name: &request.name,
+                version: &request.version,
+                description: request.description.as_ref().map(|s| s.as_str()),
+            };
+            let result = diesel::insert_into(schema::user_projects::table)
+                .values(new_user_project)
+                .execute(&conn);
+            match result {
+                Ok(_) => {
+                    log::info!(
+                        "created new user project, login: {}, name: {}, version: {}",
+                        &request.login,
+                        &request.name,
+                        &request.version
+                    );
+                    json!({ "status": "ok" }).to_string()
+                }
+                Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+                    log::warn!(
+                        "can not create new user project, login: {}, name: {}, version: {}, reason: already exists",
+                        &request.login,
+                        &request.name,
+                        &request.version
+                    );
+                    errors::email_already_exists()
+                }
+                Err(err) => {
+                    log::error!(
+                        "can not create user project, login: {}, name: {}, version: {}, reason: {:?}",
+                        &request.login,
+                        &request.name,
+                        &request.version,
+                        err
+                    );
+                    errors::internal_error()
+                }
+            }
+        }
+        Err(diesel::result::Error::NotFound) => {
+            log::warn!("user not found, login: {}", &request.login);
+            errors::account_not_found()
+        }
+        Err(reason) => {
+            log::warn!(
+                "can not get user, login: {}, reason: {}",
+                &request.login,
+                reason
+            );
+            errors::internal_error()
+        }
+    }
+}
+
+fn repo_name(login: &str, project_name: &str) -> String {
+    format!("{}-{}", login, project_name)
 }
 
 async fn init_repo(
@@ -617,18 +710,6 @@ fn build_jenkins_params(
             {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
     })
     .to_string()
-}
-
-async fn get_request(url: &str) -> Result<web::Bytes, Error> {
-    let client = client::Client::new();
-    let mut response = client
-        .get(url)
-        .header("User-Agent", "Actix-web")
-        .send()
-        .await?;
-
-    let body = response.body().await?;
-    Ok(body)
 }
 
 fn read_token(http_request: web::HttpRequest) -> Result<String, String> {
