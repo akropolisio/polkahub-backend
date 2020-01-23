@@ -1,3 +1,4 @@
+use super::schema::user_projects;
 use super::schema::users;
 
 use chrono::{DateTime, Utc};
@@ -29,4 +30,21 @@ pub struct UserWithNewToken<'a> {
     pub token: &'a str,
     pub token_expired_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Queryable)]
+pub struct UserProject {
+    pub user_id: i64,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+}
+
+#[derive(Debug, Insertable)]
+#[table_name = "user_projects"]
+pub struct NewUserProject<'a> {
+    pub user_id: i64,
+    pub name: &'a str,
+    pub version: &'a str,
+    pub description: Option<&'a str>,
 }
