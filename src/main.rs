@@ -61,6 +61,7 @@ struct FoundProject {
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
     app_name: String,
+    login: String,
     project_name: String,
     version: String,
 }
@@ -291,22 +292,20 @@ async fn handle_install_project(
         Ok(login) => login,
         Err(err) => return err,
     };
-    let account_name = "akropolis";
-    let (project_name, app_name, v) = (&request.project_name, &request.app_name, &request.version);
-    let app_url = repo_name(&login, &app_name);
-    let repo_name = repo_name(&account_name, &project_name);
+    let src_repo_name = repo_name(&request.login, &request.project_name);
+    let dst_repo_name = repo_name(&login, &request.app_name);
     match execute_deploy(
-        &repo_name,
-        &app_name,
-        &v,
+        &src_repo_name,
+        &dst_repo_name,
+        &request.version,
         &state.client,
         &state.jenkins_config,
         &state.deployer_config,
     )
     .await
     {
-        Ok(_) => build_install_project_response(&app_url, &state.base_domain),
-        Err(_) => errors::failed_to_deploy_project(app_name, v),
+        Ok(_) => build_install_project_response(&dst_repo_name, &state.base_domain),
+        Err(_) => errors::failed_to_deploy_project(&dst_repo_name, &request.version),
     }
 }
 
@@ -574,8 +573,8 @@ async fn init_repo(
 }
 
 async fn execute_deploy(
-    repo_name: &str,
-    app_name: &str,
+    src_repo_name: &str,
+    dst_repo_name: &str,
     version: &str,
     client: &Client,
     jenkins_config: &JenkinsConfig,
@@ -583,7 +582,7 @@ async fn execute_deploy(
 ) -> Result<(), std::io::Error> {
     let params = [(
         "json",
-        build_jenkins_params(repo_name, app_name, version, deployer_config),
+        build_jenkins_params(src_repo_name, dst_repo_name, version, deployer_config),
     )];
     let url = &format!(
         "{}/job/deploy-fixed-version/build",
@@ -695,16 +694,16 @@ fn build_install_project_response(app_url: &str, base_domain: &str) -> String {
 }
 
 fn build_jenkins_params(
-    repo_name: &str,
-    app_name: &str,
+    src_repo_name: &str,
+    dst_repo_name: &str,
     version: &str,
     deployer_config: &DeployerConfig,
 ) -> String {
     json!({
         "parameter": [
+            {"name":"SRC_REPO_NAME", "value": src_repo_name},
+            {"name":"DST_REPO_NAME", "value": dst_repo_name},
             {"name":"VERSION", "value": version},
-            {"name":"APP_NAME", "value": app_name},
-            {"name":"REPO_NAME", "value": repo_name},
             {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
             {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
             {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
