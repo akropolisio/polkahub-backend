@@ -23,6 +23,7 @@ mod errors;
 mod login_utils;
 mod models;
 mod password_utils;
+mod project_name_utils;
 mod schema;
 mod token;
 
@@ -224,6 +225,9 @@ async fn handle_create_project(
         Ok(login) => login,
         Err(err) => return err,
     };
+    if let Err(reason) = project_name_utils::validate_project_name(&request.project_name) {
+        return reason;
+    };
     let repo_name = repo_name(&login, &request.project_name);
     match init_repo(
         &repo_name,
@@ -296,6 +300,9 @@ async fn handle_install_project(
     let login = match get_login_by_token(state.clone(), http_request) {
         Ok(login) => login,
         Err(err) => return err,
+    };
+    if let Err(reason) = project_name_utils::validate_project_name(&request.app_name) {
+        return reason;
     };
     let src_repo_name = repo_name(&request.login, &request.project_name);
     let dst_repo_name = repo_name(&login, &request.app_name);
