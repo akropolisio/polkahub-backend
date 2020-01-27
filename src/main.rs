@@ -147,6 +147,10 @@ async fn insert_user_projects(
     handle_insert_user_projects(data, login_request).await
 }
 
+async fn verify_email(data: web::Data<Arc<State>>, info: web::Path<String>) -> impl Responder {
+    handle_verify_email(data, info).await
+}
+
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -197,6 +201,7 @@ async fn main() -> std::io::Result<()> {
                 "/api/v1/user_projects",
                 web::post().to(insert_user_projects),
             )
+            .route("/api/v1/verify_email/{token}", web::get().to(verify_email))
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
@@ -539,6 +544,53 @@ async fn handle_insert_user_projects(
                 reason
             );
             errors::internal_error()
+        }
+    }
+}
+
+async fn handle_verify_email(
+    state: web::Data<Arc<State>>,
+    info: web::Path<String>,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::schema::users::dsl::{email_verification_token, email_verified, users};
+
+    let conn = match state
+        .pool
+        .get()
+        .map_err(|_| "Internal error. Please try later.")
+    {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let token = info.to_string();
+    let filtered_users = users.filter(email_verification_token.eq(Some(&token)));
+    let result = diesel::update(filtered_users)
+        .set((
+            email_verified.eq(true),
+            email_verification_token.eq(None::<String>),
+        ))
+        .execute(&conn);
+
+    match result {
+        Ok(0) => {
+            log::info!(
+                "email not verified, because token not found, token: {}",
+                token
+            );
+            "Invalid request"
+        }
+        Ok(_) => {
+            log::info!("email verified, token: {}", token);
+            "Your email verified."
+        }
+        Err(reason) => {
+            log::error!(
+                "email verification is failed, token: {}, reason: {}",
+                token,
+                reason
+            );
+            "Internal error. Please try later."
         }
     }
 }
