@@ -44,6 +44,10 @@ pub(crate) fn invalid_original_uri() -> String {
     json!({ "status": "error", "reason": "invalid original_uri" }).to_string()
 }
 
+pub(crate) fn invalid_project_name() -> String {
+    json!({ "status": "error", "reason": "invalid project_name" }).to_string()
+}
+
 pub(crate) fn error_from_reason(reason: &str) -> String {
     json!({
         "status": "error",
