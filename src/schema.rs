@@ -17,6 +17,7 @@ table! {
         email -> Text,
         password -> Text,
         email_verified -> Bool,
+        email_verification_token -> Nullable<Text>,
         token -> Nullable<Text>,
         token_expired_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,

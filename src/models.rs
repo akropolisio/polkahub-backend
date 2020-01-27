@@ -10,6 +10,7 @@ pub struct User {
     pub email: String,
     pub password: String,
     pub email_verified: bool,
+    pub email_verification_token: Option<String>,
     pub token: Option<String>,
     pub token_expired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
