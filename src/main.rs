@@ -97,6 +97,8 @@ struct GitHookTemplte<'a> {
     deployer_api: &'a str,
     deployer_api_user: &'a str,
     deployer_api_password: &'a str,
+    login: &'a str,
+    project_name: &'a str,
 }
 
 async fn create_project(
@@ -230,6 +232,8 @@ async fn handle_create_project(
     };
     let repo_name = repo_name(&login, &request.project_name);
     match init_repo(
+        &login,
+        &request.project_name,
         &repo_name,
         &state.base_repo_dir,
         &state.jenkins_config,
@@ -607,6 +611,8 @@ fn repo_name(login: &str, project_name: &str) -> String {
 }
 
 async fn init_repo(
+    login: &str,
+    project_name: &str,
     repo_name: &str,
     base_repo_dir: &str,
     jenkins_config: &JenkinsConfig,
@@ -626,7 +632,14 @@ async fn init_repo(
     execute_command("chown", &["-R", "service.www-data", "."], &repo_path).await?;
     execute_command("chmod", &["-R", "775", "."], &repo_path).await?;
     rewrite_description(&repo_path, &repo_name).await?;
-    add_git_hook(jenkins_config, deployer_config, &repo_path).await?;
+    add_git_hook(
+        jenkins_config,
+        deployer_config,
+        &repo_path,
+        login,
+        project_name,
+    )
+    .await?;
     execute_command("chmod", &["+x", "hooks/update"], &repo_path).await?;
     Ok(())
 }
@@ -699,6 +712,8 @@ async fn add_git_hook<P>(
     jenkins_config: &JenkinsConfig,
     deployer_config: &DeployerConfig,
     repo_path: P,
+    login: &str,
+    project_name: &str,
 ) -> Result<(), std::io::Error>
 where
     P: AsRef<Path> + Debug,
@@ -712,6 +727,8 @@ where
         deployer_api: &deployer_config.deployer_api,
         deployer_api_user: &deployer_config.deployer_api_user,
         deployer_api_password: &deployer_config.deployer_api_password,
+        login,
+        project_name,
     }
     .render()
     .expect("can not render git hook data");
