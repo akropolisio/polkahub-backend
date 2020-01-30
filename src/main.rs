@@ -13,6 +13,7 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{self, fs::File, io::AsyncWriteExt, process::Command};
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ mod project_name_utils;
 mod schema;
 mod token;
 
-use config::{DatabaseConfig, DeployerConfig, JenkinsConfig};
+use config::{DatabaseConfig, DeployerConfig, JenkinsConfig, MailgunSenderConfig};
 
 struct State {
     base_domain: String,
@@ -35,6 +36,7 @@ struct State {
     base_repo_domain: String,
     jenkins_config: JenkinsConfig,
     deployer_config: DeployerConfig,
+    mailgun_sender_config: MailgunSenderConfig,
     client: Client,
     salt: String,
     pool: Pool<ConnectionManager<PgConnection>>,
@@ -170,6 +172,7 @@ async fn main() -> std::io::Result<()> {
         jenkins_config,
         deployer_config,
         database_config,
+        mailgun_sender_config,
     ) = config::read_env();
 
     let client = build_client().map_err(|e| {
@@ -185,6 +188,7 @@ async fn main() -> std::io::Result<()> {
         base_repo_domain,
         jenkins_config,
         deployer_config,
+        mailgun_sender_config,
         client,
         salt,
         pool,
@@ -345,10 +349,13 @@ async fn handle_signup(
         Ok(c) => c,
         Err(e) => return e,
     };
+    let login = &login_utils::login();
+    let email_verification_token = &token::email_verification_token();
     let new_user = models::NewUser {
-        login: &login_utils::login(),
+        login,
         email: &request.email,
         password: &password_with_salt,
+        email_verification_token,
     };
     let result = diesel::insert_into(schema::users::table)
         .values(new_user)
@@ -356,6 +363,7 @@ async fn handle_signup(
     match result {
         Ok(_) => {
             log::info!("created new user, email: {}", &request.email);
+            send_email(&state, login, &request.email, email_verification_token).await;
             json!({ "status": "ok" }).to_string()
         }
         Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
@@ -887,6 +895,41 @@ fn get_login_by_email_and_password(
         }
         Err(_) => Err(errors::account_not_found()),
     }
+}
+
+async fn send_email(state: &web::Data<Arc<State>>, login: &str, email: &str, token: &str) {
+    let text = email_verification_text(token);
+    let mut map = HashMap::new();
+    map.insert("to", email);
+    map.insert("subject", "Polkahub email verification");
+    map.insert("text", &text);
+
+    let _ = state
+        .client
+        .post(&state.mailgun_sender_config.mailgun_sender_api)
+        .json(&map)
+        .basic_auth(
+            &state.mailgun_sender_config.mailgun_sender_api_user,
+            Some(&state.mailgun_sender_config.mailgun_sender_api_password),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            log::warn!(
+                "can not sent email, login: {}, email: {}, reason: {}",
+                &login,
+                &email,
+                e
+            );
+            std::io::Error::new(std::io::ErrorKind::Other, "request to Mailgun Sender is failed")
+        });
+}
+
+fn email_verification_text(token: &str) -> String {
+    format!(
+        "Please open https://api.polkahub.org/api/v1/verify_email/{} for email verification.",
+        token
+    )
 }
 
 fn repo_url(repo_name: &str, base_domain: &str) -> String {
