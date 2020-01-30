@@ -26,6 +26,13 @@ pub(crate) struct DatabaseConfig {
     pub pool_size: u32,
 }
 
+#[derive(Debug)]
+pub(crate) struct MailgunSenderConfig {
+    pub mailgun_sender_api: String,
+    pub mailgun_sender_api_user: String,
+    pub mailgun_sender_api_password: String,
+}
+
 pub(crate) fn read_env() -> (
     String,
     u64,
@@ -37,6 +44,7 @@ pub(crate) fn read_env() -> (
     JenkinsConfig,
     DeployerConfig,
     DatabaseConfig,
+    MailgunSenderConfig,
 ) {
     (
         env::var("SERVER_IP").expect("can not read SERVER_IP"),
@@ -55,6 +63,7 @@ pub(crate) fn read_env() -> (
         read_jenkins_env(),
         read_deployer_env(),
         read_database_env(),
+        read_mailgun_sender_env(),
     )
 }
 
@@ -91,5 +100,16 @@ fn read_database_env() -> DatabaseConfig {
             .unwrap_or_else(|_| "10".to_string())
             .parse()
             .expect("can not parse POSTGRES_POOL_SIZE"),
+    }
+}
+
+fn read_mailgun_sender_env() -> MailgunSenderConfig {
+    MailgunSenderConfig {
+        mailgun_sender_api: env::var("MAILGUN_SENDER_API")
+            .expect("can not read MAILGUN_SENDER_API"),
+        mailgun_sender_api_user: env::var("MAILGUN_SENDER_API_USER")
+            .expect("can not read MAILGUN_SENDER_API_USER"),
+        mailgun_sender_api_password: env::var("MAILGUN_SENDER_API_PASSWORD")
+            .expect("can not read MAILGUN_SENDER_API_PASSWORD"),
     }
 }

@@ -23,6 +23,7 @@ pub struct NewUser<'a> {
     pub login: &'a str,
     pub email: &'a str,
     pub password: &'a str,
+    pub email_verification_token: &'a str,
 }
 
 #[derive(Debug, AsChangeset)]

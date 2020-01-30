@@ -1,5 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, Header};
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -7,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOKEN_EXPIRATION_TIME_IN_SECONDS: i64 = 30 * 24 * 60 * 60;
 const PROJECT_NAME: [u8; 8] = *b"polkahub";
+const EMAIL_VERIFICATION_TOKEN_LENGTH: usize = 40;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -28,6 +30,13 @@ pub(crate) fn token_expired_at() -> DateTime<Utc> {
     Utc::now()
         .checked_add_signed(Duration::seconds(TOKEN_EXPIRATION_TIME_IN_SECONDS))
         .expect("can not calculate token expiration time")
+}
+
+pub(crate) fn email_verification_token() -> String {
+    thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(EMAIL_VERIFICATION_TOKEN_LENGTH)
+        .collect()
 }
 
 fn current_timestamp() -> u128 {
