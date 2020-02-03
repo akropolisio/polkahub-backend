@@ -1,65 +1,92 @@
-use actix_web::{client, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
+#[macro_use]
+extern crate diesel;
+
+use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use askama::Template;
+use base64;
+use chrono::Utc;
+use diesel::pg::PgConnection;
+use diesel::r2d2::{ConnectionManager, Pool};
 use dotenv::dotenv;
-use serde_derive::Deserialize;
+use reqwest::Client;
+use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{self, fs::File, io::AsyncWriteExt, net::process::Command};
+use tokio::{self, fs::File, io::AsyncWriteExt, process::Command};
 
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 
-const FIND_URL1: &str = "https://registry.polkahub.org/v2/";
-const FIND_URL2: &str = "/tags/list";
+mod config;
+mod database;
+mod errors;
+mod login_utils;
+mod models;
+mod password_utils;
+mod project_name_utils;
+mod schema;
+mod token;
 
-#[derive(Debug)]
+use config::{DatabaseConfig, DeployerConfig, JenkinsConfig, MailgunSenderConfig};
+
 struct State {
     base_domain: String,
     base_repo_dir: String,
     base_repo_domain: String,
     jenkins_config: JenkinsConfig,
     deployer_config: DeployerConfig,
-    db: HashMap<u64, String>,
-}
-
-#[derive(Debug)]
-struct JenkinsConfig {
-    jenkins_api: String,
-    jenkins_api_user: String,
-    jenkins_api_token: String,
-    job_name: String,
-}
-
-#[derive(Debug)]
-struct DeployerConfig {
-    deployer_api: String,
-    deployer_api_user: String,
-    deployer_api_password: String,
+    mailgun_sender_config: MailgunSenderConfig,
+    client: Client,
+    salt: String,
+    pool: Pool<ConnectionManager<PgConnection>>,
+    jwt_secert: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateProjectRequest {
-    account_id: u64,
     project_name: String,
 }
+
 #[derive(Debug, Deserialize)]
 struct FindProjectRequest {
-    account_id: u64,
-    project_name: String,
-}
-#[derive(Debug, Default, Deserialize)]
-struct FoundProject {
     name: String,
-    tags: Vec<String>,
 }
+
+#[derive(Debug, Default, Serialize)]
+struct FoundProject {
+    login: String,
+    name: String,
+    version: String,
+    description: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
-    account_id: u64,
     app_name: String,
+    login: String,
     project_name: String,
     version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignupRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsertUserProjectsRequest {
+    login: String,
+    name: String,
+    version: String,
+    description: Option<String>,
 }
 
 #[derive(Template)]
@@ -72,25 +99,61 @@ struct GitHookTemplte<'a> {
     deployer_api: &'a str,
     deployer_api_user: &'a str,
     deployer_api_password: &'a str,
+    login: &'a str,
+    project_name: &'a str,
 }
 
 async fn create_project(
     data: web::Data<Arc<State>>,
     create_project_request: web::Json<CreateProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    handle_create_project(data, create_project_request).await
+    handle_create_project(data, create_project_request, http_request).await
 }
+
 async fn find_project(
     data: web::Data<Arc<State>>,
     find_project_request: web::Json<FindProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    handle_find_project(data, find_project_request).await
+    handle_find_project(data, find_project_request, http_request).await
 }
+
 async fn install_project(
     data: web::Data<Arc<State>>,
     install_project_request: web::Json<InstallProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    handle_install_project(data, install_project_request).await
+    handle_install_project(data, install_project_request, http_request).await
+}
+
+async fn signup(
+    data: web::Data<Arc<State>>,
+    signup_request: web::Json<SignupRequest>,
+) -> impl Responder {
+    handle_signup(data, signup_request).await
+}
+
+async fn login(
+    data: web::Data<Arc<State>>,
+    login_request: web::Json<LoginRequest>,
+) -> impl Responder {
+    handle_login(data, login_request).await
+}
+
+async fn git_auth(data: web::Data<Arc<State>>, http_request: web::HttpRequest) -> HttpResponse {
+    handle_git_auth(data, http_request).await
+}
+
+async fn insert_user_projects(
+    data: web::Data<Arc<State>>,
+    login_request: web::Json<InsertUserProjectsRequest>,
+) -> impl Responder {
+    handle_insert_user_projects(data, login_request).await
+}
+
+async fn verify_email(data: web::Data<Arc<State>>, info: web::Path<String>) -> impl Responder {
+    handle_verify_email(data, info).await
 }
 
 #[actix_rt::main]
@@ -105,34 +168,31 @@ async fn main() -> std::io::Result<()> {
         base_domain,
         base_repo_dir,
         base_repo_domain,
-        jenkins_api,
-        jenkins_api_user,
-        jenkins_api_token,
-        job_name,
-        deployer_api,
-        deployer_api_user,
-        deployer_api_password,
-    ) = read_env();
+        jwt_secert,
+        jenkins_config,
+        deployer_config,
+        database_config,
+        mailgun_sender_config,
+    ) = config::read_env();
 
-    let mut db = HashMap::new();
-    db.insert(1u64, "akropolis".to_string());
+    let client = build_client().map_err(|e| {
+        log::warn!("can not create HTTP client, reason: {}", e);
+        std::io::Error::new(std::io::ErrorKind::Other, "can not create HTTP client")
+    })?;
+    let pool = database::create_pool(&database_config);
+    let salt = database_config.salt;
 
     let state = Arc::new(State {
         base_domain,
         base_repo_dir,
         base_repo_domain,
-        jenkins_config: JenkinsConfig {
-            jenkins_api,
-            jenkins_api_user,
-            jenkins_api_token,
-            job_name,
-        },
-        deployer_config: DeployerConfig {
-            deployer_api,
-            deployer_api_user,
-            deployer_api_password,
-        },
-        db,
+        jenkins_config,
+        deployer_config,
+        mailgun_sender_config,
+        client,
+        salt,
+        pool,
+        jwt_secert,
     });
 
     HttpServer::new(move || {
@@ -141,174 +201,426 @@ async fn main() -> std::io::Result<()> {
             .route("/api/v1/projects", web::post().to(create_project))
             .route("/api/v1/find", web::post().to(find_project))
             .route("/api/v1/install", web::post().to(install_project))
+            .route("/api/v1/signup", web::post().to(signup))
+            .route("/api/v1/login", web::post().to(login))
+            .route("/api/v1/git_auth", web::get().to(git_auth))
+            .route(
+                "/api/v1/user_projects",
+                web::post().to(insert_user_projects),
+            )
+            .route("/api/v1/verify_email/{token}", web::get().to(verify_email))
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
     .bind(format!("{}:{}", ip, port))?
     .workers(workers)
-    .start()
+    .run()
     .await
 }
 
-fn read_env() -> (
-    String,
-    u64,
-    usize,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-) {
-    (
-        env::var("SERVER_IP").expect("can not read SERVER_IP"),
-        env::var("SERVER_PORT")
-            .expect("can not read SERVER_PORT")
-            .parse()
-            .expect("can not parse server port"),
-        env::var("SERVER_WORKERS")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse()
-            .expect("can not parse server workres"),
-        env::var("BASE_DOMAIN").expect("can not read BASE_DOMAIN"),
-        env::var("BASE_REPO_DIR").expect("can not read BASE_REPO_DIR"),
-        env::var("BASE_REPO_DOMAIN").expect("can not read BASE_REPO_DOMAIN"),
-        env::var("JENKINS_API").expect("can not read JENKINS_API"),
-        env::var("JENKINS_API_USER").expect("can not read JENKINS_API_USER"),
-        env::var("JENKINS_API_TOKEN").expect("can not read JENKINS_API_TOKEN"),
-        env::var("JOB_NAME").expect("can not read JOB_NAME"),
-        env::var("DEPLOYER_API").expect("can not read DEPLOYER_API"),
-        env::var("DEPLOYER_API_USER").expect("can not read DEPLOYER_API_USER"),
-        env::var("DEPLOYER_API_PASSWORD").expect("can not read DEPLOYER_API_PASSWORD"),
-    )
+fn build_client() -> Result<Client, reqwest::Error> {
+    Client::builder().user_agent("polkahub-backend").build()
 }
 
 async fn handle_create_project(
     state: web::Data<Arc<State>>,
     request: web::Json<CreateProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    if let Some(account_name) = state.db.get(&request.account_id) {
-        let repo_name = repo_name(account_name, &request.project_name);
-        match init_repo(
+    let login = match get_login_by_token(state.clone(), http_request) {
+        Ok(login) => login,
+        Err(err) => return err,
+    };
+    if let Err(reason) = project_name_utils::validate_project_name(&request.project_name) {
+        return reason;
+    };
+    let repo_name = repo_name(&login, &request.project_name);
+    match init_repo(
+        &login,
+        &request.project_name,
+        &repo_name,
+        &state.base_repo_dir,
+        &state.jenkins_config,
+        &state.deployer_config,
+    )
+    .await
+    {
+        Ok(()) => build_create_project_response(
+            true,
             &repo_name,
-            &state.base_repo_dir,
-            &state.jenkins_config,
-            &state.deployer_config,
-        )
-        .await
-        {
-            Ok(()) => build_create_project_response(
-                true,
+            &state.base_domain,
+            &state.base_repo_domain,
+        ),
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::AlreadyExists => build_create_project_response(
+                false,
                 &repo_name,
                 &state.base_domain,
                 &state.base_repo_domain,
             ),
-            Err(error) => match error.kind() {
-                std::io::ErrorKind::AlreadyExists => build_create_project_response(
-                    false,
-                    &repo_name,
-                    &state.base_domain,
-                    &state.base_repo_domain,
-                ),
-                _ => json!({
-                    "status": "error",
-                    "reason": format!("can not create repository directory: {}", error)
-                })
-                .to_string(),
-            },
-        }
-    } else {
-        json!({
-            "status": "error",
-            "reason": "account not found"
-        })
-        .to_string()
+            _ => errors::error_from_reason(&format!(
+                "can not create repository directory: {}",
+                error
+            )),
+        },
     }
 }
 
 async fn handle_find_project(
     state: web::Data<Arc<State>>,
     request: web::Json<FindProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    if let Some(account_name) = state.db.get(&request.account_id) {
-        let repo_name = repo_name(account_name, &request.project_name);
-        let versions = check_versions(&repo_name).await;
-        match versions {
-            Ok(v) => json!({
-                "status": "ok",
-                "payload": v,
-            })
-            .to_string(),
-            Err(_) => json!({
-                "status": "error",
-                "reason": "failed to find project"
-            })
-            .to_string(),
-        }
-    } else {
-        json!({
-            "status": "error",
-            "reason": "account not found"
-        })
-        .to_string()
+    use crate::diesel::{QueryDsl, RunQueryDsl, TextExpressionMethods};
+    use crate::schema::user_projects::dsl::{description, name, user_projects, version};
+    use crate::schema::users::dsl::{login, users};
+
+    let _login = match get_login_by_token(state.clone(), http_request) {
+        Ok(l) => l,
+        Err(err) => return err,
+    };
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    type Record = (String, String, String, Option<String>);
+    let results: Result<Vec<Record>, diesel::result::Error> = user_projects
+        .inner_join(users)
+        .filter(name.like(format!("%{}%", &request.name)))
+        .select((login, name, version, description))
+        .get_results(&conn);
+    match results {
+        Ok(projects) => json!({
+            "status": "ok",
+            "payload": projects.into_iter().map(|p| FoundProject { login: p.0, name: p.1, version: p.2, description: p.3 }).collect::<Vec<_>>(),
+        }).to_string(),
+        Err(_) => errors::failed_to_find_project(),
     }
 }
 
 async fn handle_install_project(
     state: web::Data<Arc<State>>,
     request: web::Json<InstallProjectRequest>,
+    http_request: web::HttpRequest,
 ) -> impl Responder {
-    let (project_name, app_name, v) = (&request.project_name, &request.app_name, &request.version);
-    if let Some(account_name) = state.db.get(&request.account_id) {
-        let app_url = repo_name(account_name, &app_name);
-        let repo_name = repo_name(account_name, &project_name);
-        match execute_deploy(
-            &repo_name,
-            &app_name,
-            &v,
-            &state.jenkins_config,
-            &state.deployer_config,
-        )
-        .await
-        {
-            Ok(_) => build_install_project_response(&app_url, &state.base_domain),
-            Err(_) => json!({
-                "status": "error",
-                "reason": &format!("failed to deploy {} with version {}", app_name, v),
-            })
-            .to_string(),
-        }
-    } else {
-        json!({
-            "status": "error",
-            "reason": "account not found"
-        })
-        .to_string()
+    let login = match get_login_by_token(state.clone(), http_request) {
+        Ok(login) => login,
+        Err(err) => return err,
+    };
+    if let Err(reason) = project_name_utils::validate_project_name(&request.app_name) {
+        return reason;
+    };
+    let src_repo_name = repo_name(&request.login, &request.project_name);
+    let dst_repo_name = repo_name(&login, &request.app_name);
+    match execute_deploy(
+        &src_repo_name,
+        &dst_repo_name,
+        &request.version,
+        &state.client,
+        &state.jenkins_config,
+        &state.deployer_config,
+    )
+    .await
+    {
+        Ok(_) => build_install_project_response(&dst_repo_name, &state.base_domain),
+        Err(_) => errors::failed_to_deploy_project(&dst_repo_name, &request.version),
     }
 }
 
-fn repo_name(account_name: &str, project_name: &str) -> String {
-    format!("{}-{}", account_name, project_name)
+async fn handle_signup(
+    state: web::Data<Arc<State>>,
+    request: web::Json<SignupRequest>,
+) -> impl Responder {
+    use crate::diesel::RunQueryDsl;
+    use diesel::result::{DatabaseErrorKind, Error};
+
+    if let Err(reason) = password_utils::validate_password(
+        &request.email,
+        &request.password,
+        "can not create new user",
+    ) {
+        return errors::error_from_reason(&reason);
+    }
+
+    let password_with_salt = password_utils::password_with_salt(&state.salt, &request.password);
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let login = &login_utils::login();
+    let email_verification_token = &token::email_verification_token();
+    let new_user = models::NewUser {
+        login,
+        email: &request.email,
+        password: &password_with_salt,
+        email_verification_token,
+    };
+    let result = diesel::insert_into(schema::users::table)
+        .values(new_user)
+        .execute(&conn);
+    match result {
+        Ok(_) => {
+            log::info!("created new user, email: {}", &request.email);
+            send_email(&state, login, &request.email, email_verification_token).await;
+            json!({ "status": "ok" }).to_string()
+        }
+        Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+            log::warn!(
+                "can not create new user, reason: email {} already exists",
+                &request.email
+            );
+            errors::email_already_exists()
+        }
+        Err(err) => {
+            log::error!(
+                "can not create user, email: {}, reason: {:?}",
+                &request.email,
+                err
+            );
+            errors::internal_error()
+        }
+    }
 }
 
-/// check what versions of a project already exist
-/// return array of strings or empty vector if none
-async fn check_versions(name: &str) -> Result<Vec<String>, Error> {
-    let body = get_request(&format!("{}{}{}", FIND_URL1, name, FIND_URL2)).await?;
-    let found: FoundProject = match serde_json::from_slice(&body) {
-        Ok(f) => f,
-        Err(_) => FoundProject::default(),
+async fn handle_login(
+    state: web::Data<Arc<State>>,
+    request: web::Json<LoginRequest>,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::{User, UserWithNewToken};
+    use crate::schema::users::dsl::{email, id, password, users};
+
+    if let Err(reason) =
+        password_utils::validate_password(&request.email, &request.password, "can not login user")
+    {
+        return errors::error_from_reason(&reason);
+    }
+
+    let password_with_salt = password_utils::password_with_salt(&state.salt, &request.password);
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
     };
 
-    Ok(found.tags)
+    let result = users
+        .filter(email.eq(&request.email))
+        .filter(password.eq(&password_with_salt))
+        .first::<User>(&conn);
+
+    match result {
+        Ok(user) => {
+            let token = token::token(&state.jwt_secert);
+            let updated_at = Utc::now();
+            let result = diesel::update(users.filter(id.eq(user.id)))
+                .set(UserWithNewToken {
+                    token: &token,
+                    token_expired_at: token::token_expired_at(),
+                    updated_at,
+                })
+                .execute(&conn);
+            match result {
+                Ok(_) => json!({ "status": "ok", "token": token }).to_string(),
+                Err(reason) => {
+                    log::warn!(
+                        "can not update token, email: {}, reason: {}",
+                        &request.email,
+                        reason
+                    );
+                    errors::internal_error()
+                }
+            }
+        }
+        Err(diesel::result::Error::NotFound) => {
+            log::warn!("user not found, email: {}", &request.email);
+            errors::account_not_found()
+        }
+        Err(reason) => {
+            log::warn!(
+                "can not get user, email: {}, reason: {}",
+                &request.email,
+                reason
+            );
+            errors::internal_error()
+        }
+    }
+}
+
+async fn handle_git_auth(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> HttpResponse {
+    match http_request.headers().get("authorization") {
+        Some(_auth) => {
+            let login = match get_login_by_email_and_password(state, &http_request) {
+                Ok(login) => login,
+                Err(reason) => {
+                    return HttpResponse::Unauthorized()
+                        .header("content-type", "application/json")
+                        .body(reason)
+                }
+            };
+            let original_uri = if let Some(value) = http_request.headers().get("x-original-uri") {
+                if let Ok(value_str) = value.to_str() {
+                    value_str
+                } else {
+                    return HttpResponse::Forbidden()
+                        .header("content-type", "application/json")
+                        .body(errors::invalid_original_uri());
+                }
+            } else {
+                return HttpResponse::Forbidden()
+                    .header("content-type", "application/json")
+                    .body(errors::invalid_original_uri());
+            };
+            if !(&original_uri[login.len() + 1..login.len() + 2] == "-"
+                && original_uri[1..=login.len()] == login)
+            {
+                return HttpResponse::Forbidden().into();
+            }
+            HttpResponse::Ok()
+                .header("content-type", "application/json")
+                .body(json!({"status": "ok"}).to_string())
+        }
+        None => HttpResponse::Unauthorized()
+            .header(
+                "WWW-Authenticate",
+                "Basic realm=\"Please enter your email and password\"",
+            )
+            .finish(),
+    }
+}
+
+async fn handle_insert_user_projects(
+    state: web::Data<Arc<State>>,
+    request: web::Json<InsertUserProjectsRequest>,
+) -> impl Responder {
+    use crate::diesel::{
+        result::{DatabaseErrorKind, Error},
+        ExpressionMethods, QueryDsl, RunQueryDsl,
+    };
+    use crate::models::{NewUserProject, User};
+    use crate::schema::users::dsl::{login, users};
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    let result = users.filter(login.eq(&request.login)).first::<User>(&conn);
+
+    match result {
+        Ok(user) => {
+            let new_user_project = NewUserProject {
+                user_id: user.id,
+                name: &request.name,
+                version: &request.version,
+                description: request.description.as_ref().map(|s| s.as_str()),
+            };
+            let result = diesel::insert_into(schema::user_projects::table)
+                .values(new_user_project)
+                .execute(&conn);
+            match result {
+                Ok(_) => {
+                    log::info!(
+                        "created new user project, login: {}, name: {}, version: {}",
+                        &request.login,
+                        &request.name,
+                        &request.version
+                    );
+                    json!({ "status": "ok" }).to_string()
+                }
+                Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+                    log::warn!(
+                        "can not create new user project, login: {}, name: {}, version: {}, reason: already exists",
+                        &request.login,
+                        &request.name,
+                        &request.version
+                    );
+                    errors::email_already_exists()
+                }
+                Err(err) => {
+                    log::error!(
+                        "can not create user project, login: {}, name: {}, version: {}, reason: {:?}",
+                        &request.login,
+                        &request.name,
+                        &request.version,
+                        err
+                    );
+                    errors::internal_error()
+                }
+            }
+        }
+        Err(diesel::result::Error::NotFound) => {
+            log::warn!("user not found, login: {}", &request.login);
+            errors::account_not_found()
+        }
+        Err(reason) => {
+            log::warn!(
+                "can not get user, login: {}, reason: {}",
+                &request.login,
+                reason
+            );
+            errors::internal_error()
+        }
+    }
+}
+
+async fn handle_verify_email(
+    state: web::Data<Arc<State>>,
+    info: web::Path<String>,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::schema::users::dsl::{email_verification_token, email_verified, users};
+
+    let conn = match state
+        .pool
+        .get()
+        .map_err(|_| "Internal error. Please try later.")
+    {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let token = info.to_string();
+    let filtered_users = users.filter(email_verification_token.eq(Some(&token)));
+    let result = diesel::update(filtered_users)
+        .set((
+            email_verified.eq(true),
+            email_verification_token.eq(None::<String>),
+        ))
+        .execute(&conn);
+
+    match result {
+        Ok(0) => {
+            log::info!(
+                "email not verified, because token not found, token: {}",
+                token
+            );
+            "Invalid request"
+        }
+        Ok(_) => {
+            log::info!("email verified, token: {}", token);
+            "Your email verified."
+        }
+        Err(reason) => {
+            log::error!(
+                "email verification is failed, token: {}, reason: {}",
+                token,
+                reason
+            );
+            "Internal error. Please try later."
+        }
+    }
+}
+
+fn repo_name(login: &str, project_name: &str) -> String {
+    format!("{}-{}", login, project_name)
 }
 
 async fn init_repo(
+    login: &str,
+    project_name: &str,
     repo_name: &str,
     base_repo_dir: &str,
     jenkins_config: &JenkinsConfig,
@@ -328,30 +640,47 @@ async fn init_repo(
     execute_command("chown", &["-R", "service.www-data", "."], &repo_path).await?;
     execute_command("chmod", &["-R", "775", "."], &repo_path).await?;
     rewrite_description(&repo_path, &repo_name).await?;
-    add_git_hook(jenkins_config, deployer_config, &repo_path).await?;
+    add_git_hook(
+        jenkins_config,
+        deployer_config,
+        &repo_path,
+        login,
+        project_name,
+    )
+    .await?;
     execute_command("chmod", &["+x", "hooks/update"], &repo_path).await?;
     Ok(())
 }
 
 async fn execute_deploy(
-    repo_name: &str,
-    app_name: &str,
+    src_repo_name: &str,
+    dst_repo_name: &str,
     version: &str,
+    client: &Client,
     jenkins_config: &JenkinsConfig,
     deployer_config: &DeployerConfig,
 ) -> Result<(), std::io::Error> {
-    let params = build_jenkins_params(repo_name, app_name, version, deployer_config);
-    let user = &format!(
-        "{}:{}",
-        &jenkins_config.jenkins_api_user, &jenkins_config.jenkins_api_token
-    );
+    let params = [(
+        "json",
+        build_jenkins_params(src_repo_name, dst_repo_name, version, deployer_config),
+    )];
     let url = &format!(
         "{}/job/deploy-fixed-version/build",
         &jenkins_config.jenkins_api
     );
-    let json = &format!("json={}", params);
-    let args = &[url, "-X", "POST", "-u", user, "--data-urlencode", json];
-    execute_command("curl", args, ".").await?;
+    client
+        .post(url)
+        .form(&params)
+        .basic_auth(
+            &jenkins_config.jenkins_api_user,
+            Some(&jenkins_config.jenkins_api_token),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            log::warn!("request to Jenkins is failed, reason: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, "request to Jenkins is failed")
+        })?;
     Ok(())
 }
 
@@ -391,6 +720,8 @@ async fn add_git_hook<P>(
     jenkins_config: &JenkinsConfig,
     deployer_config: &DeployerConfig,
     repo_path: P,
+    login: &str,
+    project_name: &str,
 ) -> Result<(), std::io::Error>
 where
     P: AsRef<Path> + Debug,
@@ -404,6 +735,8 @@ where
         deployer_api: &deployer_config.deployer_api,
         deployer_api_user: &deployer_config.deployer_api_user,
         deployer_api_password: &deployer_config.deployer_api_password,
+        login,
+        project_name,
     }
     .render()
     .expect("can not render git hook data");
@@ -445,16 +778,16 @@ fn build_install_project_response(app_url: &str, base_domain: &str) -> String {
 }
 
 fn build_jenkins_params(
-    repo_name: &str,
-    app_name: &str,
+    src_repo_name: &str,
+    dst_repo_name: &str,
     version: &str,
     deployer_config: &DeployerConfig,
 ) -> String {
     json!({
         "parameter": [
+            {"name":"SRC_REPO_NAME", "value": src_repo_name},
+            {"name":"DST_REPO_NAME", "value": dst_repo_name},
             {"name":"VERSION", "value": version},
-            {"name":"APP_NAME", "value": app_name},
-            {"name":"REPO_NAME", "value": repo_name},
             {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
             {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
             {"name":"DEPLOYER_API_PASSWORD", "value": deployer_config.deployer_api_password}]
@@ -462,16 +795,141 @@ fn build_jenkins_params(
     .to_string()
 }
 
-async fn get_request(url: &str) -> Result<web::Bytes, Error> {
-    let client = client::Client::new();
-    let mut response = client
-        .get(url)
-        .header("User-Agent", "Actix-web")
-        .send()
-        .await?;
+fn read_token(http_request: web::HttpRequest) -> Result<String, String> {
+    match http_request.headers().get("authorization") {
+        Some(auth) => {
+            let parts = auth
+                .to_str()
+                .map_err(|_| errors::invalid_token())?
+                .split(' ')
+                .collect::<Vec<_>>();
+            if parts.len() == 2 && parts[0] == "Bearer" {
+                Ok(parts[1].to_string())
+            } else {
+                Err(errors::invalid_token())
+            }
+        }
+        None => Err(errors::invalid_token()),
+    }
+}
 
-    let body = response.body().await?;
-    Ok(body)
+fn read_email_and_password(http_request: &web::HttpRequest) -> Result<(String, String), String> {
+    match http_request.headers().get("authorization") {
+        Some(auth) => {
+            let parts = auth
+                .to_str()
+                .map_err(|_| errors::invalid_email_and_password())?
+                .split(' ')
+                .collect::<Vec<_>>();
+            if parts.len() == 2 && parts[0] == "Basic" {
+                let decoded_credintals =
+                    base64::decode(parts[1]).map_err(|_| errors::invalid_email_and_password())?;
+                let decoded_credintals = String::from_utf8(decoded_credintals)
+                    .map_err(|_| errors::invalid_email_and_password())?;
+                if let Some(pos) = decoded_credintals.chars().position(|c| c == ':') {
+                    let email = &decoded_credintals[..pos];
+                    let password = &decoded_credintals[pos + 1..];
+                    Ok((email.to_string(), password.to_string()))
+                } else {
+                    Err(errors::invalid_email_and_password())
+                }
+            } else {
+                Err(errors::invalid_email_and_password())
+            }
+        }
+        None => Err(errors::invalid_email_and_password()),
+    }
+}
+
+fn get_login_by_token(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> Result<String, String> {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::User;
+    use crate::schema::users::dsl::{token, token_expired_at, users};
+
+    let auth_token = read_token(http_request)?;
+    let conn = state.pool.get().map_err(|_| errors::internal_error())?;
+    let result = users
+        .filter(token.eq(&auth_token))
+        .filter(token_expired_at.gt(Utc::now()))
+        .first::<User>(&conn);
+    match result {
+        Ok(user) => {
+            if user.email_verified {
+                Ok(user.login)
+            } else {
+                Err(errors::email_not_verified())
+            }
+        }
+        Err(_) => Err(errors::account_not_found()),
+    }
+}
+
+fn get_login_by_email_and_password(
+    state: web::Data<Arc<State>>,
+    http_request: &web::HttpRequest,
+) -> Result<String, String> {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::User;
+    use crate::schema::users::dsl::{email, password, users};
+
+    let (user_email, user_password) = read_email_and_password(http_request)?;
+    if user_email.is_empty() || user_password.len() < 8 {
+        return Err(errors::invalid_email_and_password());
+    }
+    let user_password_with_salt = password_utils::password_with_salt(&state.salt, &user_password);
+    let conn = state.pool.get().map_err(|_| errors::internal_error())?;
+    let result = users
+        .filter(email.eq(&user_email))
+        .filter(password.eq(&user_password_with_salt))
+        .first::<User>(&conn);
+    match result {
+        Ok(user) => {
+            if user.email_verified {
+                Ok(user.login)
+            } else {
+                Err(errors::email_not_verified())
+            }
+        }
+        Err(_) => Err(errors::account_not_found()),
+    }
+}
+
+async fn send_email(state: &web::Data<Arc<State>>, login: &str, email: &str, token: &str) {
+    let text = email_verification_text(token);
+    let mut map = HashMap::new();
+    map.insert("to", email);
+    map.insert("subject", "Polkahub email verification");
+    map.insert("text", &text);
+
+    let _ = state
+        .client
+        .post(&state.mailgun_sender_config.mailgun_sender_api)
+        .json(&map)
+        .basic_auth(
+            &state.mailgun_sender_config.mailgun_sender_api_user,
+            Some(&state.mailgun_sender_config.mailgun_sender_api_password),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            log::warn!(
+                "can not sent email, login: {}, email: {}, reason: {}",
+                &login,
+                &email,
+                e
+            );
+            std::io::Error::new(std::io::ErrorKind::Other, "request to Mailgun Sender is failed")
+        });
+}
+
+fn email_verification_text(token: &str) -> String {
+    format!(
+        "Please open https://api.polkahub.org/api/v1/verify_email/{} for email verification.",
+        token
+    )
 }
 
 fn repo_url(repo_name: &str, base_domain: &str) -> String {

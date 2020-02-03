@@ -58,3 +58,23 @@ DEPLOYER_API - Deployer API URL, e.g. "localhost:8081"
 DEPLOYER_API_USER - Deployer API user, e.g. "user"
 
 DEPLOYER_API_PASSWORD - Deployer API password, e.g. "password"
+
+POSTGRES_HOST - Postgres host, e.g. "127.0.0.1"
+
+POSTGRES_PORT - Postgres port, e.g. 5432
+
+POSTGRES_DATABASE - Postgres database name, e.g. "polkahub"
+
+POSTGRES_USER - Postgres user, e.g. "polkahub"
+
+POSTGRES_PASSWORD - Postgres password, e.g. "password"
+
+POSTGRES_SALT - Postgres salt, e.g. "salt"
+
+JWT_SECRET - JWT secret, e.g. "secret"
+
+MAILGUN_SENDER_API - Mailgun Sender API url, e.g. "http://localhost:8082/api/v1/send_email"
+
+MAILGUN_SENDER_API_USER - Mailgun Sender API user, e.g. "user"
+
+MAILGUN_SENDER_API_PASSWORD - Mailgun Sender API password, e.g. "password"
