@@ -4,7 +4,7 @@ extern crate diesel;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use askama::Template;
 use base64;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
 use dotenv::dotenv;
@@ -59,6 +59,18 @@ struct FoundProject {
     name: String,
     version: String,
     description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FoundUserProject {
+    name: String,
+    version: String,
+    description: Option<String>,
+    repo_url: String,
+    http_url: String,
+    ws_url: String,
+    created_at: i64,
+    updated_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +157,13 @@ async fn git_auth(data: web::Data<Arc<State>>, http_request: web::HttpRequest) -
     handle_git_auth(data, http_request).await
 }
 
+async fn get_user_projects(
+    data: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> impl Responder {
+    handle_get_user_projects(data, http_request).await
+}
+
 async fn insert_user_projects(
     data: web::Data<Arc<State>>,
     login_request: web::Json<InsertUserProjectsRequest>,
@@ -204,6 +223,7 @@ async fn main() -> std::io::Result<()> {
             .route("/api/v1/signup", web::post().to(signup))
             .route("/api/v1/login", web::post().to(login))
             .route("/api/v1/git_auth", web::get().to(git_auth))
+            .route("/api/v1/user_projects", web::get().to(get_user_projects))
             .route(
                 "/api/v1/user_projects",
                 web::post().to(insert_user_projects),
@@ -492,6 +512,57 @@ async fn handle_git_auth(
     }
 }
 
+async fn handle_get_user_projects(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::schema::user_projects::dsl::{
+        created_at, description, name, updated_at, user_projects, version,
+    };
+    use crate::schema::users::dsl::{login, users};
+
+    let user_login = match get_login_by_token(state.clone(), http_request) {
+        Ok(user_login) => user_login,
+        Err(err) => return err,
+    };
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    type Record = (String, String, Option<String>, DateTime<Utc>, DateTime<Utc>);
+    let results: Result<Vec<Record>, diesel::result::Error> = users
+        .inner_join(user_projects)
+        .filter(login.eq(&user_login))
+        .select((name, version, description, created_at, updated_at))
+        .get_results(&conn);
+    match results {
+        Ok(projects) => {
+            let build_found_user_project = |p: Record| {
+                let repo_name = repo_name(&user_login, &p.0);
+                FoundUserProject {
+                    name: p.0,
+                    version: p.1,
+                    description: p.2,
+                    repo_url: repo_url(&repo_name, &state.base_domain),
+                    http_url: http_url(&repo_name, &state.base_domain),
+                    ws_url: ws_url(&repo_name, &state.base_domain),
+                    created_at: p.3.timestamp(),
+                    updated_at: p.4.timestamp(),
+                }
+            };
+            json!({
+                "status": "ok",
+                "payload": projects.into_iter().map(build_found_user_project).collect::<Vec<_>>(),
+            })
+            .to_string()
+        }
+        Err(_) => errors::failed_to_get_user_projects(),
+    }
+}
+
 async fn handle_insert_user_projects(
     state: web::Data<Arc<State>>,
     request: web::Json<InsertUserProjectsRequest>,
@@ -612,10 +683,6 @@ async fn handle_verify_email(
             "Internal error. Please try later."
         }
     }
-}
-
-fn repo_name(login: &str, project_name: &str) -> String {
-    format!("{}-{}", login, project_name)
 }
 
 async fn init_repo(
@@ -921,7 +988,10 @@ async fn send_email(state: &web::Data<Arc<State>>, login: &str, email: &str, tok
                 &email,
                 e
             );
-            std::io::Error::new(std::io::ErrorKind::Other, "request to Mailgun Sender is failed")
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "request to Mailgun Sender is failed",
+            )
         });
 }
 
@@ -930,6 +1000,10 @@ fn email_verification_text(token: &str) -> String {
         "Please open https://api.polkahub.org/api/v1/verify_email/{} for email verification.",
         token
     )
+}
+
+fn repo_name(login: &str, project_name: &str) -> String {
+    format!("{}-{}", login, project_name)
 }
 
 fn repo_url(repo_name: &str, base_domain: &str) -> String {

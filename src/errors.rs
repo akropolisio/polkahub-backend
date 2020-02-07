@@ -28,6 +28,10 @@ pub(crate) fn failed_to_find_project() -> String {
     json!({ "status": "error", "reason": "failed to find project" }).to_string()
 }
 
+pub(crate) fn failed_to_get_user_projects() -> String {
+    error_from_reason("failed to get user projects")
+}
+
 pub(crate) fn internal_error() -> String {
     json!({ "status": "error", "reason": "internal error" }).to_string()
 }
