@@ -704,6 +704,18 @@ async fn init_repo(
         &repo_path,
     )
     .await?;
+    execute_command(
+        "git",
+        &[
+            "config",
+            "--file",
+            "config",
+            "hooks.allowunannotated",
+            "true",
+        ],
+        &repo_path,
+    )
+    .await?;
     execute_command("chown", &["-R", "service.www-data", "."], &repo_path).await?;
     execute_command("chmod", &["-R", "775", "."], &repo_path).await?;
     rewrite_description(&repo_path, &repo_name).await?;
