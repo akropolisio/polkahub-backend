@@ -1,3 +1,4 @@
+use super::schema::user_applications;
 use super::schema::user_projects;
 use super::schema::users;
 
@@ -45,6 +46,15 @@ pub struct UserProject {
 #[derive(Debug, Insertable)]
 #[table_name = "user_projects"]
 pub struct NewUserProject<'a> {
+    pub user_id: i64,
+    pub name: &'a str,
+    pub version: &'a str,
+    pub description: Option<&'a str>,
+}
+
+#[derive(Debug, Insertable)]
+#[table_name = "user_applications"]
+pub struct NewUserApplication<'a> {
     pub user_id: i64,
     pub name: &'a str,
     pub version: &'a str,
