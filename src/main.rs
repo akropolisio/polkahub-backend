@@ -101,6 +101,14 @@ struct InsertUserProjectsRequest {
     description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct InsertUserApplicationsRequest {
+    login: String,
+    name: String,
+    version: String,
+    description: Option<String>,
+}
+
 #[derive(Template)]
 #[template(path = "git_hook.html")]
 struct GitHookTemplte<'a> {
@@ -171,6 +179,13 @@ async fn insert_user_projects(
     handle_insert_user_projects(data, login_request).await
 }
 
+async fn insert_user_applications(
+    data: web::Data<Arc<State>>,
+    login_request: web::Json<InsertUserApplicationsRequest>,
+) -> impl Responder {
+    handle_insert_user_applications(data, login_request).await
+}
+
 async fn verify_email(data: web::Data<Arc<State>>, info: web::Path<String>) -> impl Responder {
     handle_verify_email(data, info).await
 }
@@ -227,6 +242,10 @@ async fn main() -> std::io::Result<()> {
             .route(
                 "/api/v1/user_projects",
                 web::post().to(insert_user_projects),
+            )
+            .route(
+                "/api/v1/user_applications",
+                web::post().to(insert_user_applications),
             )
             .route("/api/v1/verify_email/{token}", web::get().to(verify_email))
             .default_service(web::route().to(HttpResponse::NotFound))
@@ -609,11 +628,86 @@ async fn handle_insert_user_projects(
                         &request.name,
                         &request.version
                     );
-                    errors::email_already_exists()
+                    errors::user_project_already_exists()
                 }
                 Err(err) => {
                     log::error!(
                         "can not create user project, login: {}, name: {}, version: {}, reason: {:?}",
+                        &request.login,
+                        &request.name,
+                        &request.version,
+                        err
+                    );
+                    errors::internal_error()
+                }
+            }
+        }
+        Err(diesel::result::Error::NotFound) => {
+            log::warn!("user not found, login: {}", &request.login);
+            errors::account_not_found()
+        }
+        Err(reason) => {
+            log::warn!(
+                "can not get user, login: {}, reason: {}",
+                &request.login,
+                reason
+            );
+            errors::internal_error()
+        }
+    }
+}
+
+async fn handle_insert_user_applications(
+    state: web::Data<Arc<State>>,
+    request: web::Json<InsertUserApplicationsRequest>,
+) -> impl Responder {
+    use crate::diesel::{
+        result::{DatabaseErrorKind, Error},
+        ExpressionMethods, QueryDsl, RunQueryDsl,
+    };
+    use crate::models::{NewUserApplication, User};
+    use crate::schema::users::dsl::{login, users};
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    let result = users.filter(login.eq(&request.login)).first::<User>(&conn);
+
+    match result {
+        Ok(user) => {
+            let new_user_application = NewUserApplication {
+                user_id: user.id,
+                name: &request.name,
+                version: &request.version,
+                description: request.description.as_ref().map(|s| s.as_str()),
+            };
+            let result = diesel::insert_into(schema::user_applications::table)
+                .values(new_user_application)
+                .execute(&conn);
+            match result {
+                Ok(_) => {
+                    log::info!(
+                        "created new user application, login: {}, name: {}, version: {}",
+                        &request.login,
+                        &request.name,
+                        &request.version
+                    );
+                    json!({ "status": "ok" }).to_string()
+                }
+                Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+                    log::warn!(
+                        "can not create new user application, login: {}, name: {}, version: {}, reason: already exists",
+                        &request.login,
+                        &request.name,
+                        &request.version
+                    );
+                    errors::user_application_already_exists()
+                }
+                Err(err) => {
+                    log::error!(
+                        "can not create user application, login: {}, name: {}, version: {}, reason: {:?}",
                         &request.login,
                         &request.name,
                         &request.version,
