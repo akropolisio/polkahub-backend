@@ -52,6 +52,14 @@ pub struct NewUserProject<'a> {
     pub description: Option<&'a str>,
 }
 
+#[derive(Debug, Queryable)]
+pub struct UserApplication {
+    pub user_id: i64,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+}
+
 #[derive(Debug, Insertable)]
 #[table_name = "user_applications"]
 pub struct NewUserApplication<'a> {
