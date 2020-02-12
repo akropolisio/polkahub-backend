@@ -73,6 +73,17 @@ struct FoundUserProject {
     updated_at: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct FoundUserApplication {
+    name: String,
+    version: String,
+    description: Option<String>,
+    http_url: String,
+    ws_url: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct InstallProjectRequest {
     app_name: String,
@@ -179,6 +190,13 @@ async fn insert_user_projects(
     handle_insert_user_projects(data, login_request).await
 }
 
+async fn get_user_applications(
+    data: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> impl Responder {
+    handle_get_user_applications(data, http_request).await
+}
+
 async fn insert_user_applications(
     data: web::Data<Arc<State>>,
     login_request: web::Json<InsertUserApplicationsRequest>,
@@ -242,6 +260,10 @@ async fn main() -> std::io::Result<()> {
             .route(
                 "/api/v1/user_projects",
                 web::post().to(insert_user_projects),
+            )
+            .route(
+                "/api/v1/user_applications",
+                web::get().to(get_user_applications),
             )
             .route(
                 "/api/v1/user_applications",
@@ -654,6 +676,56 @@ async fn handle_insert_user_projects(
             );
             errors::internal_error()
         }
+    }
+}
+
+async fn handle_get_user_applications(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::schema::user_applications::dsl::{
+        created_at, description, name, updated_at, user_applications, version,
+    };
+    use crate::schema::users::dsl::{login, users};
+
+    let user_login = match get_login_by_token(state.clone(), http_request) {
+        Ok(user_login) => user_login,
+        Err(err) => return err,
+    };
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    type Record = (String, String, Option<String>, DateTime<Utc>, DateTime<Utc>);
+    let results: Result<Vec<Record>, diesel::result::Error> = users
+        .inner_join(user_applications)
+        .filter(login.eq(&user_login))
+        .select((name, version, description, created_at, updated_at))
+        .get_results(&conn);
+    match results {
+        Ok(applications) => {
+            let build_found_user_application = |p: Record| {
+                let repo_name = repo_name(&user_login, &p.0);
+                FoundUserApplication {
+                    name: p.0,
+                    version: p.1,
+                    description: p.2,
+                    http_url: http_url(&repo_name, &state.base_domain),
+                    ws_url: ws_url(&repo_name, &state.base_domain),
+                    created_at: p.3.timestamp(),
+                    updated_at: p.4.timestamp(),
+                }
+            };
+            json!({
+                "status": "ok",
+                "payload": applications.into_iter().map(build_found_user_application).collect::<Vec<_>>(),
+            })
+            .to_string()
+        }
+        Err(_) => errors::failed_to_get_user_applications(),
     }
 }
 

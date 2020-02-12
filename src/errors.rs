@@ -31,6 +31,10 @@ pub(crate) fn user_project_already_exists() -> String {
     error_from_reason("user project already exists")
 }
 
+pub(crate) fn failed_to_get_user_applications() -> String {
+    error_from_reason("failed to get user applications")
+}
+
 pub(crate) fn user_application_already_exists() -> String {
     error_from_reason("user application already exists")
 }
