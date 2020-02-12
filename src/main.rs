@@ -376,8 +376,10 @@ async fn handle_install_project(
     let src_repo_name = repo_name(&request.login, &request.project_name);
     let dst_repo_name = repo_name(&login, &request.app_name);
     match execute_deploy(
+        &login,
         &src_repo_name,
         &dst_repo_name,
+        &request.app_name,
         &request.version,
         &state.client,
         &state.jenkins_config,
@@ -898,8 +900,10 @@ async fn init_repo(
 }
 
 async fn execute_deploy(
+    login: &str,
     src_repo_name: &str,
     dst_repo_name: &str,
+    dst_app_name: &str,
     version: &str,
     client: &Client,
     jenkins_config: &JenkinsConfig,
@@ -907,7 +911,14 @@ async fn execute_deploy(
 ) -> Result<(), std::io::Error> {
     let params = [(
         "json",
-        build_jenkins_params(src_repo_name, dst_repo_name, version, deployer_config),
+        build_jenkins_params(
+            login,
+            src_repo_name,
+            dst_repo_name,
+            dst_app_name,
+            version,
+            deployer_config,
+        ),
     )];
     let url = &format!(
         "{}/job/deploy-fixed-version/build",
@@ -1023,15 +1034,19 @@ fn build_install_project_response(app_url: &str, base_domain: &str) -> String {
 }
 
 fn build_jenkins_params(
+    login: &str,
     src_repo_name: &str,
     dst_repo_name: &str,
+    dst_app_name: &str,
     version: &str,
     deployer_config: &DeployerConfig,
 ) -> String {
     json!({
         "parameter": [
+            {"name":"LOGIN", "value": login},
             {"name":"SRC_REPO_NAME", "value": src_repo_name},
             {"name":"DST_REPO_NAME", "value": dst_repo_name},
+            {"name":"DST_APP_NAME", "value": dst_app_name},
             {"name":"VERSION", "value": version},
             {"name":"DEPLOYER_API", "value": deployer_config.deployer_api},
             {"name":"DEPLOYER_API_USER", "value": deployer_config.deployer_api_user},
