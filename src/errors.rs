@@ -39,6 +39,10 @@ pub(crate) fn user_application_already_exists() -> String {
     error_from_reason("user application already exists")
 }
 
+pub(crate) fn name_is_very_short(minimum_length: usize) -> String {
+    error_from_reason(&format!("length name is less {} chars", minimum_length))
+}
+
 pub(crate) fn internal_error() -> String {
     error_from_reason("internal error")
 }
