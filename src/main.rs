@@ -53,12 +53,32 @@ struct FindProjectRequest {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExtendedSearchParams {
+    name: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 #[derive(Debug, Default, Serialize)]
 struct FoundProject {
     login: String,
     name: String,
     version: String,
     description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResult {
+    login: String,
+    name: String,
+    version: String,
+    description: Option<String>,
+    repo_url: String,
+    ws_url: String,
+    http_url: String,
+    created_at: i64,
+    updated_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +168,13 @@ async fn find_project(
     http_request: web::HttpRequest,
 ) -> impl Responder {
     handle_find_project(data, find_project_request, http_request).await
+}
+
+async fn extended_search(
+    data: web::Data<Arc<State>>,
+    params: web::Query<ExtendedSearchParams>,
+) -> impl Responder {
+    handle_extended_search(data, params).await
 }
 
 async fn install_project(
@@ -252,6 +279,7 @@ async fn main() -> std::io::Result<()> {
             .data(state.clone())
             .route("/api/v1/projects", web::post().to(create_project))
             .route("/api/v1/find", web::post().to(find_project))
+            .route("/api/v1/extended_search", web::get().to(extended_search))
             .route("/api/v1/install", web::post().to(install_project))
             .route("/api/v1/signup", web::post().to(signup))
             .route("/api/v1/login", web::post().to(login))
@@ -351,12 +379,77 @@ async fn handle_find_project(
         .inner_join(users)
         .filter(name.like(format!("%{}%", &request.name)))
         .select((login, name, version, description))
+        .limit(100)
         .get_results(&conn);
     match results {
         Ok(projects) => json!({
             "status": "ok",
             "payload": projects.into_iter().map(|p| FoundProject { login: p.0, name: p.1, version: p.2, description: p.3 }).collect::<Vec<_>>(),
         }).to_string(),
+        Err(_) => errors::failed_to_find_project(),
+    }
+}
+
+async fn handle_extended_search(
+    state: web::Data<Arc<State>>,
+    params: web::Query<ExtendedSearchParams>,
+) -> impl Responder {
+    use crate::diesel::{QueryDsl, RunQueryDsl, TextExpressionMethods};
+    use crate::schema::user_projects::dsl::{
+        created_at, description, name, updated_at, user_projects, version,
+    };
+    use crate::schema::users::dsl::{login, users};
+
+    const MINIMUM_LENGTH_NAME: usize = 2;
+    if params.name.len() < MINIMUM_LENGTH_NAME {
+        return errors::name_is_very_short(MINIMUM_LENGTH_NAME);
+    }
+
+    let limit = normalize_limit(params.limit);
+    let offset = normalize_offset(params.offset);
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    type Record = (
+        String,
+        String,
+        String,
+        Option<String>,
+        DateTime<Utc>,
+        DateTime<Utc>,
+    );
+    let results: Result<Vec<Record>, diesel::result::Error> = user_projects
+        .inner_join(users)
+        .filter(name.like(format!("%{}%", &params.name)))
+        .select((login, name, version, description, created_at, updated_at))
+        .limit(limit)
+        .offset(offset)
+        .get_results(&conn);
+    match results {
+        Ok(projects) => {
+            let build_search_result = |p: Record| {
+                let repo_name = repo_name(&p.0, &p.1);
+                SearchResult {
+                    login: p.0,
+                    name: p.1,
+                    version: p.2,
+                    description: p.3,
+                    repo_url: repo_url(&repo_name, &state.base_domain),
+                    http_url: http_url(&repo_name, &state.base_domain),
+                    ws_url: ws_url(&repo_name, &state.base_domain),
+                    created_at: p.4.timestamp(),
+                    updated_at: p.5.timestamp(),
+                }
+            };
+            json!({
+                "status": "ok",
+                "payload": projects.into_iter().map(build_search_result).collect::<Vec<_>>(),
+            })
+            .to_string()
+        }
         Err(_) => errors::failed_to_find_project(),
     }
 }
@@ -375,18 +468,15 @@ async fn handle_install_project(
     };
     let src_repo_name = repo_name(&request.login, &request.project_name);
     let dst_repo_name = repo_name(&login, &request.app_name);
-    match execute_deploy(
+    let jenkins_job_params = build_jenkins_params(
         &login,
         &src_repo_name,
         &dst_repo_name,
         &request.app_name,
         &request.version,
-        &state.client,
-        &state.jenkins_config,
         &state.deployer_config,
-    )
-    .await
-    {
+    );
+    match execute_deploy(&state.client, &state.jenkins_config, jenkins_job_params).await {
         Ok(_) => build_install_project_response(&dst_repo_name, &state.base_domain),
         Err(_) => errors::failed_to_deploy_project(&dst_repo_name, &request.version),
     }
@@ -900,26 +990,11 @@ async fn init_repo(
 }
 
 async fn execute_deploy(
-    login: &str,
-    src_repo_name: &str,
-    dst_repo_name: &str,
-    dst_app_name: &str,
-    version: &str,
     client: &Client,
     jenkins_config: &JenkinsConfig,
-    deployer_config: &DeployerConfig,
+    jenkins_job_params: String,
 ) -> Result<(), std::io::Error> {
-    let params = [(
-        "json",
-        build_jenkins_params(
-            login,
-            src_repo_name,
-            dst_repo_name,
-            dst_app_name,
-            version,
-            deployer_config,
-        ),
-    )];
+    let params = [("json", jenkins_job_params)];
     let url = &format!(
         "{}/job/deploy-fixed-version/build",
         &jenkins_config.jenkins_api
@@ -1193,6 +1268,20 @@ fn email_verification_text(token: &str) -> String {
         "Please open https://api.polkahub.org/api/v1/verify_email/{} for email verification.",
         token
     )
+}
+
+fn normalize_limit(limit: Option<i64>) -> i64 {
+    match limit {
+        Some(l) if l > 0 && l <= 100 => l,
+        _ => 100,
+    }
+}
+
+fn normalize_offset(offset: Option<i64>) -> i64 {
+    match offset {
+        Some(o) if o > 0 => o,
+        _ => 0,
+    }
 }
 
 fn repo_name(login: &str, project_name: &str) -> String {
