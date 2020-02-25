@@ -55,7 +55,7 @@ struct FindProjectRequest {
 
 #[derive(Debug, Deserialize)]
 struct ExtendedSearchParams {
-    name: String,
+    name: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -400,11 +400,6 @@ async fn handle_extended_search(
     };
     use crate::schema::users::dsl::{login, users};
 
-    const MINIMUM_LENGTH_NAME: usize = 2;
-    if params.name.len() < MINIMUM_LENGTH_NAME {
-        return errors::name_is_very_short(MINIMUM_LENGTH_NAME);
-    }
-
     let limit = normalize_limit(params.limit);
     let offset = normalize_offset(params.offset);
 
@@ -421,13 +416,21 @@ async fn handle_extended_search(
         DateTime<Utc>,
         DateTime<Utc>,
     );
-    let results: Result<Vec<Record>, diesel::result::Error> = user_projects
-        .inner_join(users)
-        .filter(name.like(format!("%{}%", &params.name)))
-        .select((login, name, version, description, created_at, updated_at))
-        .limit(limit)
-        .offset(offset)
-        .get_results(&conn);
+    let results: Result<Vec<Record>, diesel::result::Error> = match &params.name {
+        Some(n) => user_projects
+            .inner_join(users)
+            .filter(name.like(format!("%{}%", &n)))
+            .select((login, name, version, description, created_at, updated_at))
+            .limit(limit)
+            .offset(offset)
+            .get_results(&conn),
+        None => user_projects
+            .inner_join(users)
+            .select((login, name, version, description, created_at, updated_at))
+            .limit(limit)
+            .offset(offset)
+            .get_results(&conn),
+    };
     match results {
         Ok(projects) => {
             let build_search_result = |p: Record| {
