@@ -431,8 +431,15 @@ async fn handle_extended_search(
             .offset(offset)
             .get_results(&conn),
     };
-    match results {
-        Ok(projects) => {
+    let total: Result<i64, diesel::result::Error> = match &params.name {
+        Some(n) => user_projects
+            .filter(name.like(format!("%{}%", &n)))
+            .count()
+            .get_result(&conn),
+        None => user_projects.count().get_result(&conn),
+    };
+    match (results, total) {
+        (Ok(projects), Ok(total)) => {
             let build_search_result = |p: Record| {
                 let repo_name = repo_name(&p.0, &p.1);
                 SearchResult {
@@ -449,11 +456,14 @@ async fn handle_extended_search(
             };
             json!({
                 "status": "ok",
-                "payload": projects.into_iter().map(build_search_result).collect::<Vec<_>>(),
+                "payload": {
+                    "records": projects.into_iter().map(build_search_result).collect::<Vec<_>>(),
+                    "total": total,
+                },
             })
             .to_string()
         }
-        Err(_) => errors::failed_to_find_project(),
+        _ => errors::failed_to_find_project(),
     }
 }
 
