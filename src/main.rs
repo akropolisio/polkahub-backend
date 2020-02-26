@@ -83,6 +83,7 @@ struct SearchResult {
 
 #[derive(Debug, Serialize)]
 struct FoundUserProject {
+    id: i64,
     name: String,
     version: String,
     description: Option<String>,
@@ -130,6 +131,12 @@ struct InsertUserProjectsRequest {
     name: String,
     version: String,
     description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateUserProjectsRequest {
+    id: i64,
+    description: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +224,14 @@ async fn insert_user_projects(
     handle_insert_user_projects(data, login_request).await
 }
 
+async fn update_user_projects(
+    data: web::Data<Arc<State>>,
+    request: web::Json<UpdateUserProjectsRequest>,
+    http_request: web::HttpRequest,
+) -> impl Responder {
+    handle_update_user_projects(data, request, http_request).await
+}
+
 async fn get_user_applications(
     data: web::Data<Arc<State>>,
     http_request: web::HttpRequest,
@@ -289,6 +304,7 @@ async fn main() -> std::io::Result<()> {
                 "/api/v1/user_projects",
                 web::post().to(insert_user_projects),
             )
+            .route("/api/v1/user_projects", web::put().to(update_user_projects))
             .route(
                 "/api/v1/user_applications",
                 web::get().to(get_user_applications),
@@ -664,7 +680,7 @@ async fn handle_get_user_projects(
 ) -> impl Responder {
     use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
     use crate::schema::user_projects::dsl::{
-        created_at, description, name, updated_at, user_projects, version,
+        created_at, description, id, name, updated_at, user_projects, version,
     };
     use crate::schema::users::dsl::{login, users};
 
@@ -678,25 +694,33 @@ async fn handle_get_user_projects(
         Err(e) => return e,
     };
 
-    type Record = (String, String, Option<String>, DateTime<Utc>, DateTime<Utc>);
+    type Record = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        DateTime<Utc>,
+        DateTime<Utc>,
+    );
     let results: Result<Vec<Record>, diesel::result::Error> = users
         .inner_join(user_projects)
         .filter(login.eq(&user_login))
-        .select((name, version, description, created_at, updated_at))
+        .select((id, name, version, description, created_at, updated_at))
         .get_results(&conn);
     match results {
         Ok(projects) => {
             let build_found_user_project = |p: Record| {
-                let repo_name = repo_name(&user_login, &p.0);
+                let repo_name = repo_name(&user_login, &p.1);
                 FoundUserProject {
-                    name: p.0,
-                    version: p.1,
-                    description: p.2,
+                    id: p.0,
+                    name: p.1,
+                    version: p.2,
+                    description: p.3,
                     repo_url: repo_url(&repo_name, &state.base_domain),
                     http_url: http_url(&repo_name, &state.base_domain),
                     ws_url: ws_url(&repo_name, &state.base_domain),
-                    created_at: p.3.timestamp(),
-                    updated_at: p.4.timestamp(),
+                    created_at: p.4.timestamp(),
+                    updated_at: p.5.timestamp(),
                 }
             };
             json!({
@@ -778,6 +802,44 @@ async fn handle_insert_user_projects(
                 "can not get user, login: {}, reason: {}",
                 &request.login,
                 reason
+            );
+            errors::internal_error()
+        }
+    }
+}
+
+async fn handle_update_user_projects(
+    state: web::Data<Arc<State>>,
+    request: web::Json<UpdateUserProjectsRequest>,
+    http_request: web::HttpRequest,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::schema::user_projects::dsl::{description, user_id, user_projects};
+
+    let uid = match get_user_id_by_token(state.clone(), http_request) {
+        Ok(i) => i,
+        Err(err) => return err,
+    };
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    let result: Result<usize, diesel::result::Error> =
+        diesel::update(user_projects.find(request.id))
+            .filter(user_id.eq(&uid))
+            .set(description.eq(&request.description))
+            .execute(&conn);
+
+    match result {
+        Ok(count) => json!({ "status": "ok", "payload": { "updated": count } }).to_string(),
+        Err(err) => {
+            log::error!(
+                "can not update user project, id: {}, description: {}, reason: {:?}",
+                &request.id,
+                &request.description,
+                err
             );
             errors::internal_error()
         }
@@ -1207,6 +1269,32 @@ fn get_login_by_token(
         Ok(user) => {
             if user.email_verified {
                 Ok(user.login)
+            } else {
+                Err(errors::email_not_verified())
+            }
+        }
+        Err(_) => Err(errors::account_not_found()),
+    }
+}
+
+fn get_user_id_by_token(
+    state: web::Data<Arc<State>>,
+    http_request: web::HttpRequest,
+) -> Result<i64, String> {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::User;
+    use crate::schema::users::dsl::{token, token_expired_at, users};
+
+    let auth_token = read_token(http_request)?;
+    let conn = state.pool.get().map_err(|_| errors::internal_error())?;
+    let result = users
+        .filter(token.eq(&auth_token))
+        .filter(token_expired_at.gt(Utc::now()))
+        .first::<User>(&conn);
+    match result {
+        Ok(user) => {
+            if user.email_verified {
+                Ok(user.id)
             } else {
                 Err(errors::email_not_verified())
             }
