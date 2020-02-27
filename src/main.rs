@@ -603,7 +603,7 @@ async fn handle_login(
                 })
                 .execute(&conn);
             match result {
-                Ok(_) => json!({ "status": "ok", "token": token }).to_string(),
+                Ok(_) => json!({ "status": "ok", "payload": { "token": token }}).to_string(),
                 Err(reason) => {
                     log::warn!(
                         "can not update token, email: {}, reason: {}",
