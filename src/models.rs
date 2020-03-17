@@ -14,6 +14,8 @@ pub struct User {
     pub email_verification_token: Option<String>,
     pub token: Option<String>,
     pub token_expired_at: Option<DateTime<Utc>>,
+    pub password_reset_token: Option<String>,
+    pub password_reset_token_expired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -32,6 +34,23 @@ pub struct NewUser<'a> {
 pub struct UserWithNewToken<'a> {
     pub token: &'a str,
     pub token_expired_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, AsChangeset)]
+#[table_name = "users"]
+pub struct UserWithNewPasswordResetToken<'a> {
+    pub password_reset_token: &'a str,
+    pub password_reset_token_expired_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, AsChangeset)]
+#[table_name = "users"]
+pub struct UserWithNewPassword<'a> {
+    pub password: &'a str,
+    pub password_reset_token: Option<Option<&'a str>>,
+    pub password_reset_token_expired_at: Option<Option<DateTime<Utc>>>,
     pub updated_at: DateTime<Utc>,
 }
 
