@@ -147,6 +147,18 @@ struct InsertUserApplicationsRequest {
     description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ResetPasswordRequest {
+    email: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatePasswordRequest {
+    email: String,
+    password: String,
+    token: String,
+}
+
 #[derive(Template)]
 #[template(path = "git_hook.html")]
 struct GitHookTemplte<'a> {
@@ -250,6 +262,20 @@ async fn verify_email(data: web::Data<Arc<State>>, info: web::Path<String>) -> i
     handle_verify_email(data, info).await
 }
 
+async fn reset_password(
+    data: web::Data<Arc<State>>,
+    request: web::Json<ResetPasswordRequest>,
+) -> impl Responder {
+    handle_reset_password(data, request).await
+}
+
+async fn update_password(
+    data: web::Data<Arc<State>>,
+    request: web::Json<UpdatePasswordRequest>,
+) -> impl Responder {
+    handle_update_password(data, request).await
+}
+
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -314,6 +340,8 @@ async fn main() -> std::io::Result<()> {
                 web::post().to(insert_user_applications),
             )
             .route("/api/v1/verify_email/{token}", web::get().to(verify_email))
+            .route("/api/v1/reset_password", web::post().to(reset_password))
+            .route("/api/v1/update_password", web::put().to(update_password))
             .default_service(web::route().to(HttpResponse::NotFound))
             .wrap(middleware::Logger::default())
     })
@@ -545,7 +573,7 @@ async fn handle_signup(
     match result {
         Ok(_) => {
             log::info!("created new user, email: {}", &request.email);
-            send_email(&state, login, &request.email, email_verification_token).await;
+            send_verification_email(&state, login, &request.email, email_verification_token).await;
             json!({ "status": "ok" }).to_string()
         }
         Err(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
@@ -757,7 +785,7 @@ async fn handle_insert_user_projects(
                 user_id: user.id,
                 name: &request.name,
                 version: &request.version,
-                description: request.description.as_ref().map(|s| s.as_str()),
+                description: request.description.as_deref(),
             };
             let result = diesel::insert_into(schema::user_projects::table)
                 .values(new_user_project)
@@ -920,7 +948,7 @@ async fn handle_insert_user_applications(
                 user_id: user.id,
                 name: &request.name,
                 version: &request.version,
-                description: request.description.as_ref().map(|s| s.as_str()),
+                description: request.description.as_deref(),
             };
             let result = diesel::insert_into(schema::user_applications::table)
                 .values(new_user_application)
@@ -1015,6 +1043,105 @@ async fn handle_verify_email(
             );
             "Internal error. Please try later."
         }
+    }
+}
+
+async fn handle_reset_password(
+    state: web::Data<Arc<State>>,
+    request: web::Json<ResetPasswordRequest>,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::UserWithNewPasswordResetToken;
+    use crate::schema::users::dsl::{email, users};
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    let token = token::password_reset_token();
+
+    let result: Result<usize, diesel::result::Error> =
+        diesel::update(users.filter(email.eq(&request.email)))
+            .set(UserWithNewPasswordResetToken {
+                password_reset_token: &token,
+                password_reset_token_expired_at: token::password_reset_token_expired_at(),
+                updated_at: Utc::now(),
+            })
+            .execute(&conn);
+
+    match result {
+        Ok(count) => {
+            if count > 0 {
+                send_password_reset_email(&state, &request.email, &token).await;
+            }
+            json!({ "status": "ok", "payload": { "updated": count } }).to_string()
+        }
+        Err(err) => {
+            log::error!(
+                "can not update user, email: {}, reason: {:?}",
+                &request.email,
+                err
+            );
+            errors::internal_error()
+        }
+    }
+}
+
+async fn handle_update_password(
+    state: web::Data<Arc<State>>,
+    request: web::Json<UpdatePasswordRequest>,
+) -> impl Responder {
+    use crate::diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+    use crate::models::{User, UserWithNewPassword};
+    use crate::schema::users::dsl::{
+        email, password_reset_token, password_reset_token_expired_at, users,
+    };
+
+    if let Err(reason) = password_utils::validate_password(
+        &request.email,
+        &request.password,
+        "can not update user's password",
+    ) {
+        return errors::error_from_reason(&reason);
+    }
+
+    let password_with_salt = password_utils::password_with_salt(&state.salt, &request.password);
+
+    let conn = match state.pool.get().map_err(|_| errors::internal_error()) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    let result = users
+        .filter(email.eq(&request.email))
+        .filter(password_reset_token.eq(&request.token))
+        .filter(password_reset_token_expired_at.gt(Utc::now()))
+        .first::<User>(&conn);
+
+    match result {
+        Ok(user) => {
+            let result: Result<usize, diesel::result::Error> = diesel::update(users.find(user.id))
+                .set(UserWithNewPassword {
+                    password: &password_with_salt,
+                    password_reset_token: Some(None),
+                    password_reset_token_expired_at: Some(None),
+                    updated_at: Utc::now(),
+                })
+                .execute(&conn);
+            match result {
+                Ok(count) => json!({ "status": "ok", "payload": { "updated": count } }).to_string(),
+                Err(err) => {
+                    log::error!(
+                        "can not update user's password, email: {}, reason: {:?}",
+                        &request.email,
+                        err
+                    );
+                    errors::internal_error()
+                }
+            }
+        }
+        Err(_) => errors::account_not_found(),
     }
 }
 
@@ -1333,12 +1460,44 @@ fn get_login_by_email_and_password(
     }
 }
 
-async fn send_email(state: &web::Data<Arc<State>>, login: &str, email: &str, token: &str) {
-    let text = email_verification_text(token);
+async fn send_verification_email(
+    state: &web::Data<Arc<State>>,
+    login: &str,
+    email: &str,
+    token: &str,
+) {
+    send_email(
+        state,
+        login,
+        email,
+        "Polkahub email verification",
+        &email_verification_text(token),
+    )
+    .await;
+}
+
+async fn send_password_reset_email(state: &web::Data<Arc<State>>, email: &str, token: &str) {
+    send_email(
+        state,
+        "",
+        email,
+        "Polkahub password reset",
+        &reset_password_text(token),
+    )
+    .await;
+}
+
+async fn send_email(
+    state: &web::Data<Arc<State>>,
+    login: &str,
+    email: &str,
+    subject: &str,
+    text: &str,
+) {
     let mut map = HashMap::new();
     map.insert("to", email);
-    map.insert("subject", "Polkahub email verification");
-    map.insert("text", &text);
+    map.insert("subject", subject);
+    map.insert("text", text);
 
     let _ = state
         .client
@@ -1369,6 +1528,10 @@ fn email_verification_text(token: &str) -> String {
         "Please open https://api.polkahub.org/api/v1/verify_email/{} for email verification.",
         token
     )
+}
+
+fn reset_password_text(token: &str) -> String {
+    format!("Please use code: {} for reset password.", token)
 }
 
 fn normalize_limit(limit: Option<i64>) -> i64 {

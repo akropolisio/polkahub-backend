@@ -32,6 +32,8 @@ table! {
         email_verification_token -> Nullable<Text>,
         token -> Nullable<Text>,
         token_expired_at -> Nullable<Timestamptz>,
+        password_reset_token -> Nullable<Text>,
+        password_reset_token_expired_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
